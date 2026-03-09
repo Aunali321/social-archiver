@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  insta-archiver:
+    build: .
+    container_name: insta-archiver
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./database.db:/app/database.db
+      - ./session.json:/app/session.json
+      # Downloads are temporary and cleared after upload by default (CLEANUP_DOWNLOADS=true)
+      # Uncomment if you set CLEANUP_DOWNLOADS=false in .env to persist downloads
+      # - ./downloads:/app/downloads
+    restart: unless-stopped
+    command: ["uv", "run", "python", "-m", "insta_archiver"]
+    
+  # One-time history fetch (run manually)
+  insta-archiver-history:
+    build: .
+    container_name: insta-archiver-history
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./database.db:/app/database.db
+      - ./session.json:/app/session.json
+    profiles: ["history"]  # Won't start automatically
+    command: ["uv", "run", "python", "-m", "insta_archiver", "--history", "--once"]

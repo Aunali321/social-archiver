@@ -1,0 +1,38 @@
+[project]
+name = "insta-archiver"
+version = "0.1.0"
+description = "Automated Instagram content archiver to Telegram"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "instagrapi>=2.1.2",
+    "python-telegram-bot>=21.0",
+    "schedule>=1.2.2",
+    "aiosqlite>=0.20.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.28.1",
+    "pymilvus[milvus-lite]>=2.6.8",
+    "telethon>=1.42.0",
+    "sentence-transformers>=5.2.2",
+    "transformers<5.0.0",
+    "torch==2.7.0",
+    "torchvision==0.22.0",
+    "torchaudio==2.7.0"
+]
+
+
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
