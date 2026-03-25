@@ -21,6 +21,7 @@ database.db
 
 # Downloads
 downloads/
+downloads_twitter/
 
 # Logs
 logs/
