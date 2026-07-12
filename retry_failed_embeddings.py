@@ -194,7 +194,9 @@ async def retry_failed_embeddings(
 
     vlm_provider = config.VLM_PROVIDER.lower()
 
-    if vlm_provider == "gemini":
+    if vlm_provider == "vertex":
+        pass  # uses ADC (GOOGLE_APPLICATION_CREDENTIALS), no API key needed
+    elif vlm_provider == "gemini":
         if not config.GEMINI_API_KEY:
             logger.error("❌ GEMINI_API_KEY is not configured in .env")
             return
@@ -251,7 +253,17 @@ async def retry_failed_embeddings(
         logger.info("\n🚀 Initializing embedding system...")
 
         # Initialize the appropriate VLM client based on provider
-        if vlm_provider == "gemini":
+        if vlm_provider == "vertex":
+            from insta_archiver.vertex_client import VertexVLMClient
+
+            vlm_client = VertexVLMClient(
+                model=config.VERTEX_MODEL,
+                project=config.VERTEX_PROJECT,
+                location=config.VERTEX_LOCATION,
+                timeout=config.EMBEDDING_TIMEOUT,
+            )
+            vlm_model_name = config.VERTEX_MODEL
+        elif vlm_provider == "gemini":
             from insta_archiver.gemini_client import GeminiClient
 
             vlm_client = GeminiClient(

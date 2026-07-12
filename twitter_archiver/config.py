@@ -11,8 +11,8 @@ TWITTER_CT0 = os.getenv("TWITTER_CT0")
 
 # Telegram Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_BOOKMARKS = int(os.getenv("TELEGRAM_CHAT_BOOKMARKS", "0"))
-TELEGRAM_CHAT_LIKES = int(os.getenv("TELEGRAM_CHAT_LIKES", "0"))
+TELEGRAM_CHAT_BOOKMARKS = int(os.getenv("TWITTER_CHAT_BOOKMARKS", "0"))
+TELEGRAM_CHAT_LIKES = int(os.getenv("TWITTER_CHAT_LIKES", "0"))
 TELEGRAM_CHAT_ERRORS = int(os.getenv("TELEGRAM_CHAT_ERRORS", "0"))
 
 # Telegram file size limit (in MB)
@@ -24,15 +24,18 @@ TELEGRAM_BOT_API_URL = os.getenv("TELEGRAM_BOT_API_URL", "")
 # Behavior Configuration
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "200"))
-CLEANUP_DOWNLOADS = os.getenv("CLEANUP_DOWNLOADS", "true").lower() == "true"
+CLEANUP_DOWNLOADS = os.getenv("CLEANUP_DOWNLOADS", "false").lower() == "true"
 
 # Embedding Configuration
 EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "false").lower() == "true"
-VLM_PROVIDER = os.getenv("VLM_PROVIDER", "openrouter")
+VLM_PROVIDER = os.getenv("VLM_PROVIDER", "vertex")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 VLM_MODEL = os.getenv("VLM_MODEL", "google/gemini-2.5-flash-lite")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-3-flash-preview")
+VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
+VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "300"))
 TWITTER_MILVUS_URI = os.getenv("TWITTER_MILVUS_URI", "./milvus_twitter.db")
 

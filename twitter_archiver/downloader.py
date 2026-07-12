@@ -16,14 +16,13 @@ class MediaDownloader:
     async def download_tweet_media(
         self,
         tweet: SimpleTweet,
-        category: str,
         max_retries: int = config.MAX_DOWNLOAD_RETRIES,
     ) -> List[Path]:
         """Download all media from a tweet. Returns list of local paths."""
         if not tweet.has_media:
             return []
 
-        folder = self._get_folder(category)
+        folder = config.DOWNLOADS_LIKES
         folder.mkdir(parents=True, exist_ok=True)
 
         for attempt in range(1, max_retries + 1):
@@ -97,10 +96,3 @@ class MediaDownloader:
         if ".webp" in url:
             return "webp"
         return "jpg"
-
-    def _get_folder(self, category: str) -> Path:
-        folder_map = {
-            "bookmarks": config.DOWNLOADS_BOOKMARKS,
-            "likes": config.DOWNLOADS_LIKES,
-        }
-        return folder_map.get(category, config.DOWNLOADS_DIR / category)

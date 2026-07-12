@@ -1,8 +1,8 @@
 import logging
-import asyncio
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
 from pathlib import Path
 from twitter_archiver.milvus_manager import MilvusManager
+from twitter_archiver.database import Database
 from twitter_archiver.simple_tweet import SimpleTweet
 from insta_archiver import local_embedder
 
@@ -10,106 +10,135 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingProcessor:
-    """Processes tweets: VLM description + local embeddings."""
+    """Processes expanded tweet groups: one VLM call with interleaved text + media."""
 
-    def __init__(self, vlm_client: Any, milvus_manager: MilvusManager):
+    def __init__(self, vlm_client: Any, milvus_manager: MilvusManager, db: Database):
         self.vlm_client = vlm_client
         self.milvus_manager = milvus_manager
+        self.db = db
 
-    async def process_tweet(
-        self, tweet: SimpleTweet, category: str, local_paths: List[Path]
-    ) -> Tuple[bool, Optional[str]]:
-        """Generate VLM description (for media), create embedding, store in Milvus."""
-        try:
-            if local_paths:
-                return await self._process_with_media(tweet, category, local_paths)
+    async def process_expanded_group(
+        self,
+        tweets: List[SimpleTweet],
+        media_paths: Dict[str, List[Path]],
+        category: str = "likes",
+    ) -> Tuple[bool, Optional[Dict[str, str]]]:
+        """Process a full expanded group in one VLM call.
+
+        Args:
+            tweets: All tweets in the expanded group (sorted by time).
+            media_paths: Map of tweet_id -> list of downloaded media paths.
+            category: Milvus collection category.
+
+        Returns:
+            (success, {tweet_id: vlm_description} for tweets with media)
+        """
+        has_any_media = any(paths for paths in media_paths.values())
+
+        if not has_any_media:
+            for tweet in tweets:
+                await self._embed_text_only(tweet, category)
+            return True, None
+
+        # Build interleaved parts for VLM
+        parts = self._build_interleaved_parts(tweets, media_paths)
+        if not parts:
+            return False, None
+
+        media_count = sum(1 for p in parts if p["type"] == "media")
+        logger.info(
+            f"VLM thread call: {len(tweets)} tweets, {media_count} media items"
+        )
+
+        # One VLM call — returns structured ThreadCaptions
+        result = await self.vlm_client.describe_thread(parts)
+        if not result:
+            logger.error("VLM thread description failed")
+            return False, None
+
+        # Build tweet_id -> description map from structured response
+        descriptions = {}  # tweet_id -> combined description
+        for caption in result.captions:
+            tid = caption.tweet_id
+            parts = [caption.visual_description]
+            if caption.visible_text:
+                parts.append(f"Visible text: {caption.visible_text}")
+            if caption.speech_transcript:
+                parts.append(f"Speech: {caption.speech_transcript}")
+            if caption.audio_description:
+                parts.append(f"Audio: {caption.audio_description}")
+            combined = "\n\n".join(parts)
+            if tid in descriptions:
+                descriptions[tid] += "\n\n---\n\n" + combined
             else:
-                return await self._process_text_only(tweet, category)
-        except Exception as e:
-            logger.error(f"Failed to process embeddings for {tweet.id}: {e}")
-            return False, None
+                descriptions[tid] = combined
 
-    async def _process_text_only(
-        self, tweet: SimpleTweet, category: str
-    ) -> Tuple[bool, Optional[str]]:
-        """Process a text-only tweet (no VLM needed)."""
-        searchable_text = tweet.text
-        if not searchable_text or not searchable_text.strip():
-            return False, None
-
-        embedding = local_embedder.embed_document(searchable_text)
-
-        metadata = {
-            "tweet_text": tweet.text,
-            "username": tweet.author_username,
-            "tweet_id": tweet.id,
-        }
-
-        success = await self.milvus_manager.insert_embedding(
-            category=category,
-            tweet_id=tweet.id,
-            embedding=embedding,
-            text=searchable_text,
-            media_type="text",
-            resource_index=None,
-            metadata=metadata,
+        logger.info(
+            f"Got descriptions for {len(descriptions)} tweets "
+            f"({len(result.captions)} media items)"
         )
 
-        return success, None
-
-    async def _process_with_media(
-        self, tweet: SimpleTweet, category: str, local_paths: List[Path]
-    ) -> Tuple[bool, Optional[str]]:
-        """Process a tweet with media attachments."""
-        if len(local_paths) == 1:
-            return await self._process_single_media(
-                tweet, category, local_paths[0], 0
-            )
-
-        # Multiple media: process each in parallel
-        tasks = []
-        for idx, path in enumerate(local_paths):
-            tasks.append(
-                self._process_single_media(tweet, category, path, idx)
-            )
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        all_descriptions = []
-        all_success = True
-
-        for r in results:
-            if isinstance(r, Exception):
-                all_success = False
-            elif isinstance(r, tuple):
-                success, desc = r
-                if not success:
-                    all_success = False
-                if desc:
-                    all_descriptions.append(desc)
+        # Embed each tweet
+        for tweet in tweets:
+            desc = descriptions.get(tweet.id)
+            if desc:
+                await self._embed_with_description(tweet, category, desc)
             else:
-                all_success = False
+                await self._embed_text_only(tweet, category)
 
-        combined_description = (
-            "\n\n---\n\n".join(all_descriptions) if all_descriptions else None
-        )
-        return all_success, combined_description
+        return True, descriptions
 
-    async def _process_single_media(
-        self, tweet: SimpleTweet, category: str, media_path: Path, index: int
-    ) -> Tuple[bool, Optional[str]]:
-        media_type_str = self._infer_media_type(media_path)
-        if not media_type_str:
-            logger.warning(f"Cannot determine media type for {media_path}")
-            return False, None
+    def _build_interleaved_parts(
+        self,
+        tweets: List[SimpleTweet],
+        media_paths: Dict[str, List[Path]],
+    ) -> List[dict]:
+        """Build interleaved text + media parts list for VLM."""
+        parts = []
 
-        vlm_description = await self.vlm_client.describe_media(
-            media_path, media_type_str
-        )
-        if not vlm_description:
-            logger.error(f"Failed to get VLM description for {tweet.id} item {index}")
-            return False, None
+        for tweet in tweets:
+            # Build text label with tweet_id
+            label_parts = []
+            if tweet.origin and tweet.origin != "liked":
+                label_parts.append(f"[{tweet.origin}]")
 
+            text = (tweet.text or "").strip()
+            author = f"@{tweet.author_username}"
+
+            if text:
+                label = f"[tweet_id:{tweet.id}] {' '.join(label_parts)} {author}: {text}".strip()
+            else:
+                label = f"[tweet_id:{tweet.id}] {' '.join(label_parts)} {author}".strip()
+
+            # Add quoted tweet reference inline
+            if tweet.quoted_tweet_id:
+                quoted = next((t for t in tweets if t.id == tweet.quoted_tweet_id), None)
+                if quoted:
+                    q_text = (quoted.text or "").strip()
+                    if q_text:
+                        label += f"\n  ↳ Quotes @{quoted.author_username}: {q_text}"
+
+            parts.append({"type": "text", "text": label, "tweet_id": tweet.id})
+
+            # Add media for this tweet
+            paths = media_paths.get(tweet.id, [])
+            for idx, path in enumerate(paths):
+                mime = self._get_mime_type(path)
+                if mime:
+                    parts.append({
+                        "type": "media",
+                        "path": path,
+                        "mime_type": mime,
+                        "tweet_id": tweet.id,
+                        "media_index": idx,
+                    })
+
+        return parts
+
+    async def _embed_with_description(
+        self, tweet: SimpleTweet, category: str, vlm_description: str
+    ):
+        """Create embedding for a tweet that has a VLM description."""
         searchable_text = self._build_searchable_text(tweet.text, vlm_description)
         embedding = local_embedder.embed_document(searchable_text)
 
@@ -119,25 +148,48 @@ class EmbeddingProcessor:
             "tweet_id": tweet.id,
         }
 
-        success = await self.milvus_manager.insert_embedding(
+        await self.milvus_manager.insert_embedding(
             category=category,
             tweet_id=tweet.id,
             embedding=embedding,
             text=searchable_text,
-            media_type=media_type_str,
-            resource_index=index if len(tweet.media) > 1 else None,
+            media_type="media",
+            resource_index=None,
             metadata=metadata,
         )
 
-        return success, vlm_description
+    async def _embed_text_only(self, tweet: SimpleTweet, category: str):
+        """Embed a text-only tweet (no VLM)."""
+        text = (tweet.text or "").strip()
+        if not text:
+            return
 
-    def _infer_media_type(self, path: Path) -> Optional[str]:
+        embedding = local_embedder.embed_document(text)
+
+        metadata = {
+            "tweet_text": tweet.text,
+            "username": tweet.author_username,
+            "tweet_id": tweet.id,
+        }
+
+        await self.milvus_manager.insert_embedding(
+            category=category,
+            tweet_id=tweet.id,
+            embedding=embedding,
+            text=text,
+            media_type="text",
+            resource_index=None,
+            metadata=metadata,
+        )
+
+    def _get_mime_type(self, path: Path) -> Optional[str]:
         suffix = path.suffix.lower()
-        if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
-            return "image"
-        elif suffix in {".mp4", ".mov", ".avi", ".webm", ".mkv"}:
-            return "video"
-        return None
+        return {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+            ".gif": "image/gif", ".webp": "image/webp",
+            ".mp4": "video/mp4", ".mov": "video/quicktime",
+            ".avi": "video/x-msvideo", ".webm": "video/webm",
+        }.get(suffix)
 
     def _build_searchable_text(
         self, tweet_text: Optional[str], vlm_description: str

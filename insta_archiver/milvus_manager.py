@@ -6,7 +6,7 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_DIM = 768
+EMBEDDING_DIM = 1024
 
 
 def get_doc_id(media_pk: int, resource_index: Optional[int] = None) -> int:

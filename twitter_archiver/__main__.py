@@ -33,12 +33,6 @@ def parse_args():
         "--daemon", action="store_true", help="Run in daemon mode (default)"
     )
 
-    parser.add_argument(
-        "--category",
-        choices=["bookmarks", "likes"],
-        help="Process only this category",
-    )
-
     return parser.parse_args()
 
 
@@ -77,7 +71,9 @@ async def main():
             vlm_provider = config.VLM_PROVIDER.lower()
             api_key_missing = False
 
-            if vlm_provider == "gemini":
+            if vlm_provider == "vertex":
+                pass  # uses ADC (GOOGLE_APPLICATION_CREDENTIALS), no API key needed
+            elif vlm_provider == "gemini":
                 if not config.GEMINI_API_KEY:
                     logger.error("VLM_PROVIDER=gemini but GEMINI_API_KEY is not set")
                     api_key_missing = True
@@ -97,7 +93,17 @@ async def main():
                         "Initializing embedding system (VLM + local embeddings)"
                     )
 
-                    if vlm_provider == "gemini":
+                    if vlm_provider == "vertex":
+                        from insta_archiver.vertex_client import VertexVLMClient
+
+                        vlm_client = VertexVLMClient(
+                            model=config.VERTEX_MODEL,
+                            project=config.VERTEX_PROJECT,
+                            location=config.VERTEX_LOCATION,
+                            timeout=config.EMBEDDING_TIMEOUT,
+                        )
+                        vlm_model_name = config.VERTEX_MODEL
+                    elif vlm_provider == "gemini":
                         from insta_archiver.gemini_client import GeminiClient
 
                         vlm_client = GeminiClient(
@@ -118,7 +124,7 @@ async def main():
 
                     milvus_manager = MilvusManager(uri=config.TWITTER_MILVUS_URI)
                     milvus_manager.initialize_collections()
-                    embedding_processor = EmbeddingProcessor(vlm_client, milvus_manager)
+                    embedding_processor = EmbeddingProcessor(vlm_client, milvus_manager, db)
                     logger.info(
                         f"Embedding system initialized: provider={vlm_provider}, model={vlm_model_name}"
                     )
@@ -138,21 +144,19 @@ async def main():
         processor = Processor(tw_client, tg_client, db, downloader, embedding_processor)
         scheduler = Scheduler(processor)
 
-        categories = [args.category] if args.category else None
-
         try:
             if args.init:
                 logger.info(
                     "Running --init: fetching full history then starting daemon"
                 )
-                await scheduler.run_once(fetch_all=True, categories=categories)
+                await processor.process_likes(fetch_all=True)
                 logger.info("History fetch complete. Starting daemon mode...")
                 scheduler.run_daemon()
             elif args.once:
-                await scheduler.run_once(fetch_all=args.history, categories=categories)
+                await processor.process_likes(fetch_all=args.history)
             elif args.history:
                 logger.info("Running history mode")
-                await scheduler.run_once(fetch_all=True, categories=categories)
+                await processor.process_likes(fetch_all=True)
             else:
                 scheduler.run_daemon()
         finally:

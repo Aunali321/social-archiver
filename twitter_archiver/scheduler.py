@@ -13,19 +13,9 @@ class Scheduler:
         self.processor = processor
         self.running = False
 
-    async def run_once(self, fetch_all: bool = False, categories: list = None):
+    async def run_once(self, fetch_all: bool = False):
         logger.info("Running single iteration")
-
-        if categories is None:
-            categories = []
-            if config.TELEGRAM_CHAT_BOOKMARKS:
-                categories.append("bookmarks")
-            if config.TELEGRAM_CHAT_LIKES:
-                categories.append("likes")
-
-        for category in categories:
-            await self.processor.process_category(category, fetch_all)
-
+        await self.processor.process_likes(fetch_all=fetch_all)
         logger.info("Completed iteration")
 
     def schedule_periodic(self):

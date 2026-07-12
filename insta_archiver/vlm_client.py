@@ -47,7 +47,7 @@ class VLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(self, media_path: Path, media_type: str) -> Optional[str]:
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: Optional[str] = None) -> Optional[str]:
         """Use VLM to describe image/video content."""
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
@@ -78,7 +78,7 @@ class VLMClient:
         payload = {
             "model": self.vlm_model,
             "messages": [{"role": "user", "content": content}],
-            "max_tokens": 1024,
+            "max_tokens": 8192,
         }
 
         return await self._call_openrouter(payload)

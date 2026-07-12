@@ -9,8 +9,7 @@ from twitter_archiver.twitter_client import TwitterClient
 from twitter_archiver.telegram_client import TelegramClient
 from twitter_archiver.database import Database
 from twitter_archiver.downloader import MediaDownloader
-from twitter_archiver.fetchers.bookmarks import BookmarksFetcher
-from twitter_archiver.fetchers.likes import LikesFetcher
+from twitter_archiver.expander import TweetExpander
 from twitter_archiver.simple_tweet import SimpleTweet
 
 logger = logging.getLogger(__name__)
@@ -31,22 +30,104 @@ class Processor:
         self.downloader = downloader
         self.embedding_processor = embedding_processor
 
-        self.bookmarks_fetcher = BookmarksFetcher(tw_client)
-        self.likes_fetcher = LikesFetcher(tw_client)
-
-    async def process_category(self, category: str, fetch_all: bool = False):
-        logger.info(f"Processing category: {category} (fetch_all={fetch_all})")
+    async def process_likes(self, fetch_all: bool = False):
+        """
+        Main processing pipeline for likes:
+        1. Fetch all liked tweets
+        2. Expand recursively (threads, parents, quotes, liked replies)
+        3. Deduplicate against DB
+        4. Download, upload, embed each new tweet
+        """
+        logger.info(f"Processing likes (fetch_all={fetch_all})")
 
         max_retries = 5
         retry_delay = 180
 
         for attempt in range(1, max_retries + 1):
             try:
-                if fetch_all:
-                    tweet_list = await self._fetch_tweets(category, fetch_all=True)
-                    await self._process_tweet_list(tweet_list, category)
-                else:
-                    await self._process_with_smart_pagination(category)
+                # Step 1: Fetch liked tweets
+                # For sync mode, pass known IDs so we stop at the first known tweet
+                known_ids = None
+                if not fetch_all:
+                    known_ids = await self.db.get_liked_tweet_ids()
+                    logger.info(f"Cursor-based sync: {len(known_ids)} known liked tweets in DB")
+
+                raw_likes = await self._fetch_raw_likes(
+                    amount=0, known_ids=known_ids
+                )
+                if not raw_likes:
+                    logger.info("No likes found")
+                    return
+
+                logger.info(f"Fetched {len(raw_likes)} liked tweets")
+
+                # Step 2: Expand recursively
+                expander = TweetExpander(self.tw_client, page_delay=1.5)
+                expanded_tweets = await expander.expand_likes(raw_likes)
+
+                logger.info(
+                    f"Expanded to {len(expanded_tweets)} total tweets "
+                    f"(from {len(raw_likes)} likes)"
+                )
+
+                # Step 3: Deduplicate against DB
+                existing_ids = await self.db.get_all_tweet_ids()
+                new_tweets = [t for t in expanded_tweets if t.id not in existing_ids]
+
+                logger.info(
+                    f"Found {len(new_tweets)} new tweets "
+                    f"({len(expanded_tweets) - len(new_tweets)} already in DB)"
+                )
+
+                if not new_tweets:
+                    return
+
+                # Step 4: Process each tweet
+                # Sort so that liked tweets come first, then by creation time
+                new_tweets.sort(key=lambda t: (
+                    0 if t.origin == "liked" else 1,
+                    t.created_at or datetime_min(),
+                ))
+
+                # Phase A: DB insert, download, telegram upload for each tweet
+                media_paths_map = {}  # tweet_id -> list of Paths
+                for tweet in new_tweets:
+                    paths = await self._process_single_tweet(tweet)
+                    if paths:
+                        media_paths_map[tweet.id] = paths
+
+                # Phase B: One VLM call for the whole expanded group
+                if config.EMBEDDING_ENABLED and self.embedding_processor:
+                    try:
+                        sorted_tweets = sorted(
+                            new_tweets,
+                            key=lambda t: t.created_at or datetime_min(),
+                        )
+                        success, descriptions = await self.embedding_processor.process_expanded_group(
+                            sorted_tweets, media_paths_map
+                        )
+                        if success:
+                            for tweet in new_tweets:
+                                desc = descriptions.get(tweet.id) if descriptions else None
+                                await self.db.mark_embedded(
+                                    tweet.id, True, vlm_description=desc
+                                )
+                        else:
+                            for tweet in new_tweets:
+                                await self.db.mark_embedded(
+                                    tweet.id, False, "Group VLM call failed"
+                                )
+                    except Exception as e:
+                        logger.error(f"Batch embedding failed: {e}")
+                        for tweet in new_tweets:
+                            await self.db.mark_embedded(tweet.id, False, str(e))
+
+                # Phase C: Cleanup downloaded files if configured
+                if config.CLEANUP_DOWNLOADS:
+                    for paths in media_paths_map.values():
+                        self._cleanup_downloads(paths)
+
+                logger.info(f"Processed {len(new_tweets)} new tweets")
                 return
 
             except Exception as e:
@@ -58,76 +139,49 @@ class Processor:
 
                 if is_rate_limit and attempt < max_retries:
                     logger.warning(
-                        f"Rate limit hit for {category} (attempt {attempt}/{max_retries}). "
+                        f"Rate limit hit (attempt {attempt}/{max_retries}). "
                         f"Waiting {retry_delay}s..."
                     )
                     await asyncio.sleep(retry_delay)
                     retry_delay = min(retry_delay * 1.5, 1800)
                     continue
 
-                logger.error(f"Error processing {category}: {e}\n{error_msg}")
+                logger.error(f"Error processing likes: {e}\n{error_msg}")
                 await self.tg_client.send_error_notification(
                     error_type=type(e).__name__,
-                    context=f"process_category:{category}",
+                    context="process_likes",
                     traceback=error_msg,
                 )
                 raise
 
-    async def _process_with_smart_pagination(self, category: str):
-        tweet_list = await self._fetch_tweets(category, fetch_all=False)
+    async def _fetch_raw_likes(
+        self, amount: int = 0, known_ids: set = None
+    ) -> List[dict]:
+        """Fetch raw liked tweet dicts from the API.
+        If known_ids is provided, stops fetching when a known tweet is hit."""
+        result = await self.tw_client.get_all_likes(
+            limit=amount, page_delay=1.5, known_ids=known_ids
+        )
 
-        if not tweet_list:
-            logger.info(f"{category}: No items found")
-            return
+        if not result.get("success"):
+            error = result.get("error", "Unknown error")
+            raise RuntimeError(f"Failed to fetch likes: {error}")
 
-        logger.info(f"{category}: Fetched {len(tweet_list)} items")
+        return result.get("tweets", [])
 
-        new_tweets = []
-        for tweet in tweet_list:
-            if not await self.db.is_processed(tweet.id):
-                new_tweets.append(tweet)
+    async def _process_single_tweet(self, tweet: SimpleTweet) -> Optional[List[Path]]:
+        """Process a single tweet: insert in DB, download media, upload to Telegram.
 
-        logger.info(f"{category}: Found {len(new_tweets)}/{len(tweet_list)} new items")
-
-        for tweet in new_tweets:
-            await self._process_single_tweet(tweet, category)
-
-        logger.info(f"{category}: Processed {len(new_tweets)} new items")
-
-    async def _process_tweet_list(
-        self, tweet_list: List[SimpleTweet], category: str
-    ):
-        logger.info(f"Fetched {len(tweet_list)} items from {category}")
-
-        new_tweets = []
-        for tweet in tweet_list:
-            if not await self.db.is_processed(tweet.id):
-                new_tweets.append(tweet)
-
-        logger.info(f"Found {len(new_tweets)} new items in {category}")
-
-        for tweet in new_tweets:
-            await self._process_single_tweet(tweet, category)
-
-    async def _process_single_tweet(self, tweet: SimpleTweet, category: str):
+        Returns list of downloaded media paths (for batch embedding later).
+        """
         paths = []
         try:
-            await self.db.insert_tweet(
-                tweet_id=tweet.id,
-                category=category,
-                author_username=tweet.author_username,
-                author_id=tweet.author_id,
-                tweet_text=tweet.text,
-                post_url=tweet.post_url,
-                has_media=tweet.has_media,
-                media_count=len(tweet.media),
-                created_at=tweet.created_at,
-                status="pending",
-            )
+            # Insert into DB with full linking
+            await self.db.insert_tweet(**tweet.to_db_dict())
 
             # Download media if present
             if tweet.has_media:
-                paths = await self.downloader.download_tweet_media(tweet, category)
+                paths = await self.downloader.download_tweet_media(tweet)
                 if paths:
                     await self.db.mark_downloaded(tweet.id, [str(p) for p in paths])
 
@@ -139,83 +193,34 @@ class Processor:
                 tweet.created_at,
                 like_count=tweet.like_count,
                 retweet_count=tweet.retweet_count,
+                origin=tweet.origin,
             )
 
-            chat_id = self._get_chat_id(category)
+            chat_id = config.TELEGRAM_CHAT_LIKES
+            if not chat_id:
+                raise ValueError("TELEGRAM_CHAT_LIKES is not set")
 
             # Upload to Telegram
             if paths:
-                # Parallel upload and embedding generation
-                upload_task = self.tg_client.send_media(
+                message_ids = await self.tg_client.send_media(
                     chat_id, paths, caption, has_video=tweet.has_video
                 )
-
-                embedding_task = None
-                if config.EMBEDDING_ENABLED and self.embedding_processor:
-                    embedding_task = self.embedding_processor.process_tweet(
-                        tweet, category, paths
-                    )
-
-                if embedding_task:
-                    results = await asyncio.gather(
-                        upload_task, embedding_task, return_exceptions=True
-                    )
-                    message_ids = results[0]
-                    embedding_success = results[1]
-
-                    if isinstance(message_ids, Exception):
-                        raise message_ids
-
-                    if isinstance(embedding_success, Exception):
-                        logger.error(
-                            f"Embedding failed for {tweet.id}: {embedding_success}"
-                        )
-                        await self.db.mark_embedded(
-                            tweet.id, False, str(embedding_success)
-                        )
-                    elif isinstance(embedding_success, tuple):
-                        success, vlm_description = embedding_success
-                        if success:
-                            await self.db.mark_embedded(
-                                tweet.id, True, vlm_description=vlm_description
-                            )
-                        else:
-                            await self.db.mark_embedded(
-                                tweet.id, False, "Embedding generation returned False"
-                            )
-                else:
-                    message_ids = await upload_task
             else:
-                # Text-only tweet
                 message_ids = await self.tg_client.send_text(chat_id, caption)
 
-                # Embedding for text-only tweets
-                if config.EMBEDDING_ENABLED and self.embedding_processor:
-                    try:
-                        result = await self.embedding_processor.process_tweet(
-                            tweet, category, []
-                        )
-                        if isinstance(result, tuple):
-                            success, vlm_description = result
-                            await self.db.mark_embedded(
-                                tweet.id, success, vlm_description=vlm_description
-                            )
-                    except Exception as e:
-                        logger.error(f"Embedding failed for {tweet.id}: {e}")
-                        await self.db.mark_embedded(tweet.id, False, str(e))
-
             await self.db.mark_uploaded(tweet.id, message_ids)
-            logger.info(f"Successfully processed {tweet.id} to {category}")
+            logger.info(
+                f"Processed {tweet.id} (@{tweet.author_username}, origin={tweet.origin})"
+            )
 
-            if config.CLEANUP_DOWNLOADS and paths:
-                self._cleanup_downloads(paths)
+            # Don't cleanup yet — paths needed for batch embedding
+            return paths or None
 
         except RetryAfter as e:
             error_msg = f"Telegram flood control: retry after {e.retry_after}s"
             logger.warning(f"Flood control hit for {tweet.id}: {error_msg}")
             await self.db.update_status(tweet.id, "pending", error_msg)
-            if config.CLEANUP_DOWNLOADS and paths:
-                self._cleanup_downloads(paths)
+            return None
         except Exception as e:
             error_msg = traceback.format_exc()
             logger.error(f"Failed to process {tweet.id}: {e}")
@@ -225,6 +230,7 @@ class Processor:
                 context=f"process_tweet:{tweet.id}",
                 traceback=error_msg,
             )
+            return None
 
     def _cleanup_downloads(self, paths: List[Path]):
         for path in paths:
@@ -235,26 +241,7 @@ class Processor:
             except Exception as e:
                 logger.warning(f"Failed to cleanup {path}: {e}")
 
-    async def _fetch_tweets(
-        self, category: str, fetch_all: bool
-    ) -> List[SimpleTweet]:
-        amount = 0 if fetch_all else config.FETCH_BATCH_SIZE
 
-        if category == "bookmarks":
-            return await self.bookmarks_fetcher.fetch_bookmarks(amount)
-        elif category == "likes":
-            return await self.likes_fetcher.fetch_likes(amount)
-        else:
-            raise ValueError(f"Unknown category: {category}")
-
-    def _get_chat_id(self, category: str) -> int:
-        chat_map = {
-            "bookmarks": config.TELEGRAM_CHAT_BOOKMARKS,
-            "likes": config.TELEGRAM_CHAT_LIKES,
-        }
-        chat_id = chat_map.get(category, 0)
-        if not chat_id:
-            raise ValueError(
-                f"No Telegram chat ID configured for category: {category}"
-            )
-        return chat_id
+def datetime_min():
+    from datetime import datetime, timezone
+    return datetime(1970, 1, 1, tzinfo=timezone.utc)

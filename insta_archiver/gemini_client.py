@@ -47,7 +47,7 @@ class GeminiClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(self, media_path: Path, media_type: str) -> Optional[str]:
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: Optional[str] = None) -> Optional[str]:
         """Use Gemini VLM to describe image/video content."""
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
@@ -78,7 +78,7 @@ class GeminiClient:
                 }
             ],
             "generationConfig": {
-                "maxOutputTokens": 1024,
+                "maxOutputTokens": 8192,
             },
             "safetySettings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},

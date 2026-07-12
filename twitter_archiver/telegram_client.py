@@ -277,13 +277,25 @@ Traceback:
         created_at: Optional[datetime],
         like_count: Optional[int] = None,
         retweet_count: Optional[int] = None,
+        origin: Optional[str] = None,
     ) -> str:
         caption_parts = []
 
         if tweet_text:
             caption_parts.append(tweet_text)
 
-        caption_parts.append(f"\n@{author_username}")
+        if origin and origin != "liked":
+            origin_labels = {
+                "thread": "thread",
+                "parent": "parent",
+                "quoted": "quoted",
+                "liked_reply": "liked reply",
+                "retweet": "retweet",
+            }
+            label = origin_labels.get(origin, origin)
+            caption_parts.append(f"\n[{label}]")
+
+        caption_parts.append(f"@{author_username}")
 
         stats = []
         if like_count is not None:

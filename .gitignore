@@ -14,6 +14,10 @@ wheels/
 
 # Session data
 session.json
+*.session
+
+# Credentials
+service-account.json
 
 # Database
 database.db
@@ -39,3 +43,7 @@ logs/
 Thumbs.db
 
 reference/
+
+# Test fixtures/output
+test_vlm_media/
+test_thread_captions_output.json

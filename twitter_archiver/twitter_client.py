@@ -3,6 +3,7 @@ Twitter GraphQL API client, ported from the bird TypeScript library.
 Uses cookie-based authentication (auth_token + ct0) to access Twitter's
 internal GraphQL endpoints.
 """
+import asyncio
 import json
 import logging
 import secrets
@@ -33,6 +34,7 @@ FALLBACK_QUERY_IDS = {
     "Bookmarks": ["tmd4ifV8RHltzn8ymGg1aw"],
     "Likes": [],
     "UserTweets": [],
+    "TweetDetail": [],
 }
 
 # Feature flags required by Twitter's GraphQL API
@@ -90,6 +92,36 @@ BOOKMARKS_FEATURES = {
 }
 
 LIKES_FEATURES = TIMELINE_FEATURES.copy()
+
+TWEET_DETAIL_FEATURES = {
+    **TIMELINE_FEATURES,
+    "responsive_web_graphql_exclude_directive_enabled": True,
+    "communities_web_enable_tweet_community_results_fetch": True,
+    "responsive_web_twitter_article_plain_text_enabled": True,
+    "responsive_web_twitter_article_seed_tweet_detail_enabled": True,
+    "responsive_web_twitter_article_seed_tweet_summary_enabled": True,
+    "articles_preview_enabled": True,
+    "articles_rest_api_enabled": True,
+    "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+    "creator_subscriptions_tweet_preview_api_enabled": True,
+    "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+    "view_counts_everywhere_api_enabled": True,
+    "longform_notetweets_consumption_enabled": True,
+    "responsive_web_twitter_article_tweet_consumption_enabled": True,
+    "freedom_of_speech_not_reach_fetch_enabled": True,
+    "standardized_nudges_misinfo": True,
+    "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+    "rweb_video_timestamps_enabled": True,
+}
+
+TWEET_DETAIL_FIELD_TOGGLES = {
+    "withPayments": False,
+    "withAuxiliaryUserLabels": False,
+    "withArticleRichContentState": True,
+    "withArticlePlainText": True,
+    "withGrokAnalyze": False,
+    "withDisallowedReplyControls": False,
+}
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -222,6 +254,166 @@ class TwitterClient:
         return [qid for qid in ids if qid]
 
     # =========================================================================
+    # TweetDetail (conversation/thread fetching)
+    # =========================================================================
+
+    async def get_tweet_detail(
+        self, tweet_id: str, cursor: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Fetch TweetDetail for a tweet — returns the focal tweet + full
+        conversation (threaded_conversation_with_injections_v2).
+
+        This is the key endpoint for thread expansion. One call returns:
+        - The focal tweet itself
+        - All tweets in the conversation thread
+        - Ancestors, siblings, descendants
+        """
+        variables = {
+            "focalTweetId": tweet_id,
+            "with_rux_injections": False,
+            "rankingMode": "Relevance",
+            "includePromotedContent": True,
+            "withCommunity": True,
+            "withQuickPromoteEligibilityTweetFields": True,
+            "withBirdwatchNotes": True,
+            "withVoice": True,
+        }
+        if cursor:
+            variables["cursor"] = cursor
+
+        query_ids = self._get_query_ids("TweetDetail")
+        success, data, error = await self._graphql_get_with_fallbacks(
+            "TweetDetail", query_ids, variables, TWEET_DETAIL_FEATURES,
+            field_toggles=TWEET_DETAIL_FIELD_TOGGLES,
+        )
+
+        if not success:
+            # Try POST fallback like bird does on 404
+            if error and "404" in error:
+                for query_id in query_ids:
+                    post_success, post_data, post_error = await self._graphql_post(
+                        "TweetDetail", query_id, variables, TWEET_DETAIL_FEATURES,
+                        field_toggles=TWEET_DETAIL_FIELD_TOGGLES,
+                    )
+                    if post_success:
+                        return self._parse_tweet_detail_response(post_data, tweet_id)
+            raise RuntimeError(f"TweetDetail failed for {tweet_id}: {error}")
+
+        return self._parse_tweet_detail_response(data, tweet_id)
+
+    async def _graphql_post(
+        self,
+        operation: str,
+        query_id: str,
+        variables: Dict[str, Any],
+        features: Dict[str, bool],
+        field_toggles: Optional[Dict[str, bool]] = None,
+    ) -> Tuple[bool, Optional[Dict], Optional[str]]:
+        """Make a GraphQL POST request (fallback for 404 on GET)."""
+        url = f"{config.TWITTER_API_BASE}/{query_id}/{operation}"
+        body = {"variables": variables, "features": features, "queryId": query_id}
+        if field_toggles:
+            body["fieldToggles"] = field_toggles
+
+        client = await self._get_client()
+        try:
+            response = await client.post(url, headers=self._get_headers(), json=body)
+            if response.status_code == 404:
+                return False, None, f"HTTP 404 POST (query_id={query_id})"
+            if response.status_code == 429:
+                return False, None, "Rate limited (429)"
+            if response.status_code != 200:
+                text = response.text[:200]
+                return False, None, f"HTTP {response.status_code}: {text}"
+            data = response.json()
+            if "errors" in data and data["errors"]:
+                error_msg = ", ".join(e.get("message", "") for e in data["errors"])
+                if data.get("data"):
+                    logger.warning(f"GraphQL POST errors (non-fatal): {error_msg}")
+                else:
+                    return False, None, error_msg
+            return True, data, None
+        except httpx.TimeoutException:
+            return False, None, "Request timed out"
+        except Exception as e:
+            return False, None, str(e)
+
+    def _parse_tweet_detail_response(
+        self, data: Dict, focal_tweet_id: str
+    ) -> Dict[str, Any]:
+        """Parse TweetDetail response into structured result."""
+        data_root = data.get("data", {})
+
+        # Parse focal tweet from tweetResult
+        focal_result = data_root.get("tweetResult", {}).get("result")
+
+        # Parse all tweets from threaded conversation
+        instructions = (
+            data_root
+            .get("threaded_conversation_with_injections_v2", {})
+            .get("instructions", [])
+        )
+
+        all_tweets = _parse_tweets_from_instructions(instructions)
+
+        # If focal tweet not in conversation results, parse it separately
+        if focal_result:
+            focal_mapped = _map_tweet_result(focal_result)
+            if focal_mapped:
+                # Check if already in all_tweets
+                existing_ids = {t["id"] for t in all_tweets}
+                if focal_mapped["id"] not in existing_ids:
+                    all_tweets.insert(0, focal_mapped)
+
+        # Also try to find focal tweet in instructions if tweetResult was empty
+        if not focal_result:
+            focal_result = _find_tweet_in_instructions(instructions, focal_tweet_id)
+            if focal_result:
+                focal_mapped = _map_tweet_result(focal_result)
+
+        next_cursor = _extract_cursor(instructions)
+
+        return {
+            "success": True,
+            "tweets": all_tweets,
+            "next_cursor": next_cursor,
+        }
+
+    async def get_thread(
+        self, tweet_id: str, max_pages: int = 5, page_delay: float = 1.0
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch the full conversation thread for a tweet.
+        Returns all tweets in the conversation, paginating if needed.
+        """
+        all_tweets = []
+        seen_ids = set()
+        cursor = None
+
+        for page in range(max_pages):
+            if page > 0 and page_delay > 0:
+                await asyncio.sleep(page_delay)
+
+            result = await self.get_tweet_detail(tweet_id, cursor=cursor)
+            tweets = result.get("tweets", [])
+
+            added = 0
+            for tweet in tweets:
+                tid = tweet.get("id")
+                if tid and tid not in seen_ids:
+                    seen_ids.add(tid)
+                    all_tweets.append(tweet)
+                    added += 1
+
+            next_cursor = result.get("next_cursor")
+            if not next_cursor or next_cursor == cursor or added == 0:
+                break
+            cursor = next_cursor
+
+        return all_tweets
+
+    # =========================================================================
     # Bookmarks
     # =========================================================================
 
@@ -278,38 +470,26 @@ class TwitterClient:
     # =========================================================================
 
     async def get_current_user_id(self) -> Optional[str]:
-        """Get the current user's ID from settings endpoint."""
+        """Get the current user's ID."""
         if self.client_user_id:
             return self.client_user_id
 
         client = await self._get_client()
         try:
             response = await client.get(
-                "https://x.com/i/api/1.1/account/settings.json",
+                "https://x.com/i/api/1.1/account/multi/list.json",
                 headers=self._get_headers(),
             )
             if response.status_code == 200:
-                data = response.json()
-                screen_name = data.get("screen_name")
-                if screen_name:
-                    logger.info(f"Authenticated as @{screen_name}")
-                    # Get user ID from another endpoint
-                    user_response = await client.get(
-                        f"https://x.com/i/api/graphql/{QUERY_IDS.get('UserTweets', '')}/UserByScreenName",
-                        headers=self._get_headers(),
-                    )
-                    # Fallback: use the viewer endpoint
-                    viewer_url = "https://x.com/i/api/1.1/account/verify_credentials.json"
-                    viewer_response = await client.get(
-                        viewer_url, headers=self._get_headers()
-                    )
-                    if viewer_response.status_code == 200:
-                        viewer_data = viewer_response.json()
-                        user_id = str(viewer_data.get("id", ""))
-                        if user_id:
-                            self.client_user_id = user_id
-                            logger.info(f"User ID: {user_id}")
-                            return user_id
+                users = response.json().get("users", [])
+                if users:
+                    user = users[0]
+                    user_id = str(user.get("user_id", ""))
+                    screen_name = user.get("screen_name", "")
+                    if user_id:
+                        self.client_user_id = user_id
+                        logger.info(f"Authenticated as @{screen_name} (ID: {user_id})")
+                        return user_id
         except Exception as e:
             logger.error(f"Failed to get current user: {e}")
 
@@ -364,10 +544,12 @@ class TwitterClient:
         self,
         limit: int = 0,
         page_delay: float = 1.0,
+        known_ids: Optional[set] = None,
     ) -> Dict[str, Any]:
-        """Fetch all likes with pagination. limit=0 means all."""
+        """Fetch all likes with pagination. limit=0 means all.
+        If known_ids is provided, stops fetching when a known tweet is encountered."""
         return await self._paginate(
-            self.get_likes, limit=limit, page_delay=page_delay
+            self.get_likes, limit=limit, page_delay=page_delay, known_ids=known_ids
         )
 
     # =========================================================================
@@ -380,14 +562,18 @@ class TwitterClient:
         limit: int = 0,
         page_delay: float = 1.0,
         max_pages: int = 100,
+        known_ids: Optional[set] = None,
+        known_hit_threshold: int = 3,
     ) -> Dict[str, Any]:
-        """Generic paginator for timeline endpoints."""
-        import asyncio
-
+        """Generic paginator for timeline endpoints.
+        If known_ids is provided, stops after hitting known_hit_threshold consecutive
+        known tweets (guards against deleted/unliked tweets creating false stop points)."""
         all_tweets = []
         seen_ids = set()
         cursor = None
         unlimited = limit == 0
+        consecutive_known = 0
+        hit_threshold = False
 
         for page_num in range(max_pages):
             if page_num > 0 and page_delay > 0:
@@ -398,19 +584,37 @@ class TwitterClient:
 
             if not result.get("success"):
                 if all_tweets:
-                    # Return what we have so far
                     return {"success": True, "tweets": all_tweets, "error": result.get("error")}
                 return result
 
             added = 0
             for tweet in result.get("tweets", []):
                 tweet_id = tweet.get("id")
-                if tweet_id and tweet_id not in seen_ids:
-                    seen_ids.add(tweet_id)
-                    all_tweets.append(tweet)
-                    added += 1
-                    if not unlimited and len(all_tweets) >= limit:
+                if not tweet_id or tweet_id in seen_ids:
+                    continue
+
+                if known_ids and tweet_id in known_ids:
+                    consecutive_known += 1
+                    if consecutive_known >= known_hit_threshold:
+                        hit_threshold = True
+                        logger.info(
+                            f"Hit {known_hit_threshold} consecutive known tweets "
+                            f"on page {page_num + 1}, stopping fetch "
+                            f"({len(all_tweets)} new tweets)"
+                        )
                         break
+                    continue
+
+                # Reset counter when we see a new tweet
+                consecutive_known = 0
+                seen_ids.add(tweet_id)
+                all_tweets.append(tweet)
+                added += 1
+                if not unlimited and len(all_tweets) >= limit:
+                    break
+
+            if hit_threshold:
+                break
 
             if not unlimited and len(all_tweets) >= limit:
                 break
@@ -427,16 +631,22 @@ class TwitterClient:
         """Verify that the provided credentials are valid."""
         client = await self._get_client()
         try:
+            # v1.1 endpoints are dead (404), use multi/list instead
             response = await client.get(
-                "https://x.com/i/api/1.1/account/verify_credentials.json",
+                "https://x.com/i/api/1.1/account/multi/list.json",
                 headers=self._get_headers(),
             )
             if response.status_code == 200:
-                data = response.json()
-                username = data.get("screen_name", "unknown")
-                logger.info(f"Credentials verified: @{username}")
-                self.client_user_id = str(data.get("id", ""))
-                return True
+                users = response.json().get("users", [])
+                if users:
+                    user = users[0]
+                    username = user.get("screen_name", "unknown")
+                    user_id = str(user.get("user_id", ""))
+                    self.client_user_id = user_id
+                    logger.info(f"Credentials verified: @{username} (ID: {user_id})")
+                    return True
+                logger.error("Credential verification: no users in response")
+                return False
             else:
                 logger.error(f"Credential verification failed: HTTP {response.status_code}")
                 return False
@@ -578,13 +788,34 @@ def _map_tweet_result(result: Optional[Dict]) -> Optional[Dict[str, Any]]:
     media = _extract_media(result)
     legacy = result.get("legacy", {})
 
-    # Extract quoted tweet (one level deep)
+    # Detect retweet
+    retweeted_status = legacy.get("retweeted_status_result", {}).get("result")
+    is_retweet = retweeted_status is not None
+    retweeted_tweet_id = None
+    if retweeted_status:
+        unwrapped_rt = _unwrap_tweet_result(retweeted_status)
+        if unwrapped_rt:
+            retweeted_tweet_id = unwrapped_rt.get("rest_id")
+
+    # Extract quoted tweet (recursive)
     quoted_tweet = None
+    quoted_tweet_id = None
     quoted_result = _unwrap_tweet_result(
         result.get("quoted_status_result", {}).get("result")
     )
     if quoted_result:
         quoted_tweet = _map_tweet_result(quoted_result)
+        if quoted_tweet:
+            quoted_tweet_id = quoted_tweet["id"]
+
+    # Extract view count
+    view_count = None
+    views = result.get("views", {})
+    if views and views.get("count"):
+        try:
+            view_count = int(views["count"])
+        except (ValueError, TypeError):
+            pass
 
     return {
         "id": tweet_id,
@@ -596,11 +827,31 @@ def _map_tweet_result(result: Optional[Dict]) -> Optional[Dict[str, Any]]:
         "reply_count": legacy.get("reply_count"),
         "retweet_count": legacy.get("retweet_count"),
         "like_count": legacy.get("favorite_count"),
+        "quote_count": legacy.get("quote_count"),
+        "bookmark_count": legacy.get("bookmark_count"),
+        "view_count": view_count,
         "conversation_id": legacy.get("conversation_id_str"),
         "in_reply_to_status_id": legacy.get("in_reply_to_status_id_str"),
+        "quoted_tweet_id": quoted_tweet_id,
+        "retweeted_tweet_id": retweeted_tweet_id,
+        "is_retweet": is_retweet,
         "media": media if media else None,
         "quoted_tweet": quoted_tweet,
     }
+
+
+def _find_tweet_in_instructions(
+    instructions: List[Dict], tweet_id: str
+) -> Optional[Dict]:
+    """Find a specific tweet result in instructions by ID."""
+    for instruction in instructions:
+        for entry in instruction.get("entries", []):
+            results = _collect_tweet_results_from_entry(entry)
+            for result in results:
+                unwrapped = _unwrap_tweet_result(result)
+                if unwrapped and unwrapped.get("rest_id") == tweet_id:
+                    return unwrapped
+    return None
 
 
 def _collect_tweet_results_from_entry(entry: Dict) -> List[Dict]:
