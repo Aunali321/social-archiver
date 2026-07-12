@@ -19,10 +19,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("test")
 
-from twitter_archiver.twitter_client import TwitterClient
-from twitter_archiver.expander import TweetExpander
-from twitter_archiver.downloader import MediaDownloader
-from insta_archiver.vertex_client import VertexVLMClient
+from social_archiver.platforms.twitter.client import TwitterClient
+from social_archiver.platforms.twitter.expander import TweetExpander
+from social_archiver.platforms.twitter.downloader import MediaDownloader
+from social_archiver.llm.vertex_client import VertexVLMClient
 
 
 def get_mime(path: Path) -> str | None:
@@ -71,7 +71,8 @@ async def main(n_likes: int):
 
     log.info("Expanding...")
     expander = TweetExpander(tw, page_delay=1.5)
-    expanded = await expander.expand_likes(raw)
+    expanded = await expander.expand(raw)
+    expanded = [t for t in expanded if not t.is_tombstone]
     expanded.sort(key=lambda t: t.created_at or datetime(1970, 1, 1, tzinfo=timezone.utc))
     log.info(f"Expanded: {len(expanded)} tweets")
 

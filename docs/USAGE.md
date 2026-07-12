@@ -22,16 +22,16 @@ nano .env
 
 ```bash
 # First-time setup: Fetch ALL history then start daemon
-uv run python -m insta_archiver --init
+uv run python -m social_archiver.platforms.instagram --init
 
 # One-time fetch (last 200 items per category)
-uv run python -m insta_archiver --once
+uv run python -m social_archiver.platforms.instagram --once
 
 # Fetch ALL history (entire Instagram archive)
-uv run python -m insta_archiver --history
+uv run python -m social_archiver.platforms.instagram --history
 
 # Daemon mode only (runs every 30min forever)
-uv run python -m insta_archiver
+uv run python -m social_archiver.platforms.instagram
 ```
 
 **Recommendation:** Use `--init` on first run to archive everything, then it automatically continues in daemon mode.
@@ -49,7 +49,7 @@ uv run python -m insta_archiver
 - **Daemon**: Checks every 30min (configurable via `CHECK_INTERVAL_MINUTES`)
 
 ### Smart Deduplication
-- Database tracks all processed items by `media_pk`
+- Database tracks all processed items by `item_id`
 - Skips already-downloaded content
 - Safe to run multiple times
 
@@ -86,16 +86,16 @@ uv run python -m insta_archiver
 
 ### File Organization
 ```
-downloads/              # Temporary (deleted after upload by default)
+downloads/instagram/    # Temporary (deleted after upload by default)
 ├── likes/
-│   └── {media_pk}.jpg
+│   └── {item_id}.jpg
 ├── saved/
 │   ├── Memes/          # Organized by collection
-│   │   └── {media_pk}.mp4
+│   │   └── {item_id}.mp4
 │   └── Recipes/
-│       └── {media_pk}.jpg
+│       └── {item_id}.jpg
 └── shared/
-    └── {media_pk}.mp4
+    └── {item_id}.mp4
 ```
 
 **Note:** Downloads are automatically deleted after successful Telegram upload by default (controlled via `CLEANUP_DOWNLOADS`). Main storage is in Telegram.
@@ -106,33 +106,33 @@ downloads/              # Temporary (deleted after upload by default)
 ```bash
 # Fetches last 200 items by default (covers ~3-5 days)
 # To fetch more items, set FETCH_BATCH_SIZE in .env
-uv run python -m insta_archiver --once
+uv run python -m social_archiver.platforms.instagram --once
 ```
 
 ### After Long Downtime (>1 week)
 ```bash
 # Fetch everything since last run
-uv run python -m insta_archiver --history --once
+uv run python -m social_archiver.platforms.instagram --history --once
 ```
 
 ### Production Deployment
 ```bash
 # Run as daemon with auto-restart
-uv run python -m insta_archiver
+uv run python -m social_archiver.platforms.instagram
 ```
 
 ### Testing
 ```bash
 # Check connection & credentials
-uv run python -m insta_archiver --once
-# Watch logs/insta_archiver.log
+uv run python -m social_archiver.platforms.instagram --once
+# Watch logs/instagram.log
 ```
 
 ## Deployment Options
 
 ### Option 1: systemd (Linux)
 
-Create `/etc/systemd/system/insta-archiver.service`:
+Create `/etc/systemd/system/instagram-archiver.service`:
 ```ini
 [Unit]
 Description=Instagram to Telegram Archiver
@@ -141,9 +141,9 @@ After=network.target
 [Service]
 Type=simple
 User=your_user
-WorkingDirectory=/path/to/insta-archiver
+WorkingDirectory=/path/to/social-archiver
 Environment="PATH=/path/to/.local/bin:/usr/bin"
-ExecStart=/home/your_user/.local/bin/uv run python -m insta_archiver
+ExecStart=/home/your_user/.local/bin/uv run python -m social_archiver.platforms.instagram
 Restart=always
 RestartSec=10
 
@@ -153,14 +153,14 @@ WantedBy=multi-user.target
 
 Enable and start:
 ```bash
-sudo systemctl enable insta-archiver
-sudo systemctl start insta-archiver
-sudo systemctl status insta-archiver
+sudo systemctl enable instagram-archiver
+sudo systemctl start instagram-archiver
+sudo systemctl status instagram-archiver
 ```
 
 View logs:
 ```bash
-sudo journalctl -u insta-archiver -f
+sudo journalctl -u instagram-archiver -f
 ```
 
 ### Option 2: Docker Compose (Recommended)
@@ -171,15 +171,15 @@ cp .env.example .env
 nano .env
 
 # First-time setup: Fetch ALL history then start daemon
-docker compose up insta-archiver-history --profile history
+docker compose up instagram-archiver-history --profile history
 # Wait for completion, then start daemon
-docker compose up -d insta-archiver
+docker compose up -d instagram-archiver
 
 # Or just start daemon (skips history)
-docker compose up -d insta-archiver
+docker compose up -d instagram-archiver
 
 # View logs
-docker compose logs -f insta-archiver
+docker compose logs -f instagram-archiver
 
 # Stop
 docker compose down
@@ -198,8 +198,8 @@ The docker-compose.yml includes:
 screen -S archiver
 
 # Run archiver
-cd /path/to/insta-archiver
-uv run python -m insta_archiver
+cd /path/to/social-archiver
+uv run python -m social_archiver.platforms.instagram
 
 # Detach: Ctrl+A, D
 # Reattach: screen -r archiver
@@ -214,7 +214,7 @@ crontab -e
 
 Add line (runs every 30min):
 ```cron
-*/30 * * * * cd /path/to/insta-archiver && /home/user/.local/bin/uv run python -m insta_archiver --once >> /path/to/logs/cron.log 2>&1
+*/30 * * * * cd /path/to/social-archiver && /home/user/.local/bin/uv run python -m social_archiver.platforms.instagram --once >> /path/to/logs/cron.log 2>&1
 ```
 
 ## Monitoring
@@ -222,33 +222,33 @@ Add line (runs every 30min):
 ### Check Status
 ```bash
 # View recent logs
-tail -f logs/insta_archiver.log
+tail -f logs/instagram.log
 
 # Check database stats
-sqlite3 database.db "SELECT category, COUNT(*) as total, SUM(CASE WHEN status='uploaded' THEN 1 ELSE 0 END) as uploaded FROM processed_media GROUP BY category"
+sqlite3 data/instagram.db "SELECT category, COUNT(*) as total, SUM(CASE WHEN status='uploaded' THEN 1 ELSE 0 END) as uploaded FROM items WHERE platform='instagram' GROUP BY category"
 
 # Check disk usage
-du -sh downloads/
+du -sh downloads/instagram/
 ```
 
 ### Health Checks
 - Error notifications sent to `TELEGRAM_CHAT_ERRORS`
 - Log rotation: 30 days retention
-- Session persists in `session.json`
+- Session persists in `data/instagram_session.json`
 
 ## Troubleshooting
 
 ### Instagram Login Failed
 ```bash
 # Delete session and retry
-rm session.json
-uv run python -m insta_archiver --once
+rm data/instagram_session.json
+uv run python -m social_archiver.platforms.instagram --once
 ```
 
 ### Missing .env Variables
 ```bash
 # Validate config
-uv run python -c "from insta_archiver import config; config.validate_config()"
+uv run python -c "from social_archiver.platforms.instagram import config; config.validate_config()"
 ```
 
 ### Telegram Upload Timeout
@@ -265,22 +265,22 @@ uv run python -c "from insta_archiver import config; config.validate_config()"
 
 ### View Processed Items
 ```bash
-sqlite3 database.db
-SELECT media_code, category, author_username, collection_name 
-FROM processed_media 
-ORDER BY fetched_at DESC 
+sqlite3 data/instagram.db
+SELECT item_id, category, author_username, metadata
+FROM items WHERE platform='instagram'
+ORDER BY fetched_at DESC
 LIMIT 10;
 ```
 
 ### Reset Category
 ```bash
-sqlite3 database.db "DELETE FROM processed_media WHERE category='saved'"
-uv run python -m insta_archiver --once
+sqlite3 data/instagram.db "DELETE FROM items WHERE platform='instagram' AND category='saved'"
+uv run python -m social_archiver.platforms.instagram --once
 ```
 
 ### Backup Database
 ```bash
-cp database.db database.backup.db
+cp data/instagram.db data/instagram.backup.db
 ```
 
 ## Advanced

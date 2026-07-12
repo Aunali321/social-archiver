@@ -1,7 +1,7 @@
 [project]
-name = "insta-archiver"
-version = "0.1.0"
-description = "Automated Instagram content archiver to Telegram"
+name = "social-archiver"
+version = "0.2.0"
+description = "Automated multi-platform social media archiver to Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -37,3 +37,8 @@ explicit = true
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+
+[tool.ruff.lint.per-file-ignores]
+# Platform config.py files re-export shared constants from core.config so callers
+# can do `from social_archiver.platforms.X import config; config.SOME_SHARED_VAR`.
+"social_archiver/platforms/*/config.py" = ["F401"]

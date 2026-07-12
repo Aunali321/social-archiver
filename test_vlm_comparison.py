@@ -97,7 +97,7 @@ Describe: visual scenes, subjects, actions, setting, all audible speech (transcr
 
 async def fetch_media_tweets(count=5, video_only=False, pages=5):
     """Fetch likes and return tweets that have media."""
-    from twitter_archiver.twitter_client import TwitterClient
+    from social_archiver.platforms.twitter.client import TwitterClient
 
     client = TwitterClient()
     if not await client.verify_credentials():

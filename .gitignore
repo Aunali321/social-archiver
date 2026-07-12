@@ -23,9 +23,11 @@ service-account.json
 database.db
 *.db
 
+# Runtime data (sqlite + milvus lite files)
+data/
+
 # Downloads
 downloads/
-downloads_twitter/
 
 # Logs
 logs/
@@ -47,3 +49,5 @@ reference/
 # Test fixtures/output
 test_vlm_media/
 test_thread_captions_output.json
+downloads_twitter/likes/
+WORK_LOG.md

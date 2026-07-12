@@ -46,7 +46,7 @@ INSTAGRAM_MILVUS_URI=./milvus_instagram.db
 ### 3. Run the Archiver
 
 ```bash
-uv run python -m insta_archiver
+uv run python -m social_archiver.platforms.instagram
 ```
 
 The archiver will now:
@@ -181,7 +181,7 @@ If you're changing from a different embedding model, you need to recreate the Mi
 
 ```python
 # In Python or add --recreate-embeddings flag (TODO)
-from insta_archiver.milvus_manager import MilvusManager
+from social_archiver.core.milvus_manager import MilvusManager
 manager = MilvusManager("./milvus_instagram.db", 2560)
 manager.initialize_collections(recreate=True)
 ```
@@ -197,7 +197,7 @@ If you were previously using the local vLLM setup:
 
 2. Recreate Milvus collections (existing embeddings will be lost):
    ```python
-   from insta_archiver.milvus_manager import MilvusManager
+   from social_archiver.core.milvus_manager import MilvusManager
    manager = MilvusManager("./milvus_instagram.db", 2560)
    manager.initialize_collections(recreate=True)
    ```

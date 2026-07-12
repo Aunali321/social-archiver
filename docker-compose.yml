@@ -1,28 +1,48 @@
 version: '3.8'
 
 services:
-  insta-archiver:
+  instagram-archiver:
     build: .
-    container_name: insta-archiver
+    container_name: instagram-archiver
     env_file: .env
     volumes:
       - ./logs:/app/logs
-      - ./database.db:/app/database.db
-      - ./session.json:/app/session.json
+      - ./data:/app/data
       # Downloads are temporary and cleared after upload by default (CLEANUP_DOWNLOADS=true)
       # Uncomment if you set CLEANUP_DOWNLOADS=false in .env to persist downloads
       # - ./downloads:/app/downloads
     restart: unless-stopped
-    command: ["uv", "run", "python", "-m", "insta_archiver"]
-    
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram"]
+
   # One-time history fetch (run manually)
-  insta-archiver-history:
+  instagram-archiver-history:
     build: .
-    container_name: insta-archiver-history
+    container_name: instagram-archiver-history
     env_file: .env
     volumes:
       - ./logs:/app/logs
-      - ./database.db:/app/database.db
-      - ./session.json:/app/session.json
+      - ./data:/app/data
     profiles: ["history"]  # Won't start automatically
-    command: ["uv", "run", "python", "-m", "insta_archiver", "--history", "--once"]
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram", "--history", "--once"]
+
+  twitter-archiver:
+    build: .
+    container_name: twitter-archiver
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+      # - ./downloads:/app/downloads
+    restart: unless-stopped
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter"]
+
+  # One-time history fetch (run manually)
+  twitter-archiver-history:
+    build: .
+    container_name: twitter-archiver-history
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    profiles: ["history"]  # Won't start automatically
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter", "--history", "--once"]
