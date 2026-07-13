@@ -1,17 +1,22 @@
-"""Recursive tweet expander.
+"""Recursive tweet expander, v2 (phased, request-minimal).
 
-Given a set of seed tweets (likes or bookmarks), recursively expands:
-1. Self-reply chains (full thread, both directions)
-2. Parent chain to conversation root
-3. Quoted tweets (recursive)
-4. Tweets linked by URL in the text (recursive)
-5. Seed replies to any tweet in the expanded set
-6. Retweets -> expand the original tweet
+Given a set of seed tweets (likes or bookmarks), archives everything connected:
+self-reply threads (both directions), parent chains to the conversation root,
+quoted tweets, URL-linked tweets, retweet originals — all recursively — plus
+tombstones for tweets that existed in the graph but are gone.
 
-Uses a conversation cache to minimize API calls: one TweetDetail call per
-conversation_id, re-fetched only when a later focal tweet's branch is missing.
-Unavailable tweets (deleted, protected, suspended) become tombstone records
-instead of silent gaps.
+Fetch strategy (see X_RESEARCH.md for the measurements behind it):
+- Phase 1  REF CLOSURE: quoted/linked/retweeted/parent IDs are resolved via
+  TweetResultsByRestIds, up to 100 per request, breadth-first until closure.
+  Cost scales with graph depth, not tweet count. Missing IDs become tombstones.
+- Phase 2  THREAD DISCOVERY: for tweets with reply_count > 0, the author's tweets
+  in that conversation are fetched via SearchTimeline with OR-batched
+  `(from:author conversation_id:conv)` groups — complete author threads with
+  zero viral-reply noise. reply_count == 0 proves standalone: zero requests.
+- Fallback: TweetDetail (relevance-stop pagination) when the author is protected
+  (invisible to search) or the search index provably missed the conversation.
+
+The phases loop until nothing new is discovered.
 """
 import logging
 from datetime import datetime, timezone
@@ -21,6 +26,10 @@ from social_archiver.platforms.twitter.client import TwitterClient
 from social_archiver.platforms.twitter.simple_tweet import SimpleTweet
 
 logger = logging.getLogger(__name__)
+
+MAX_ITERATIONS = 10
+
+TOMBSTONE_REASON_BATCH = "unavailable (deleted, protected, or suspended account)"
 
 
 def datetime_min() -> datetime:
@@ -32,240 +41,258 @@ def _is_rate_limit(e: Exception) -> bool:
     return "429" in msg or "rate" in msg
 
 
+def _refs_of(tweet: dict[str, Any]) -> list[str]:
+    refs = []
+    if quoted_id := tweet.get("quoted_tweet_id"):
+        refs.append(quoted_id)
+    if retweeted_id := tweet.get("retweeted_tweet_id"):
+        refs.append(retweeted_id)
+    if parent_id := tweet.get("in_reply_to_status_id"):
+        refs.append(parent_id)
+    refs.extend(tweet.get("linked_tweet_ids") or [])
+    return refs
+
+
 class TweetExpander:
-    """Expands seed tweets into full linked sets.
-
-    1. Pre-fetch all seeds into a set (seed_ids).
-    2. For each seed tweet, fetch its conversation via TweetDetail, cached by
-       conversation_id so the same conversation is never re-fetched.
-    3. From the conversation, extract the full self-reply chain, all ancestors
-       (walking in_reply_to_status_id to root), and each ancestor's self-reply chain.
-    4. Recursively expand quoted and URL-linked tweets with the same rules.
-    5. For every tweet in the expanded set, pull in any seed replies.
-    6. Retweets: pull in and expand the original tweet.
-    7. Repeat (queue-driven) until no new tweets are discovered.
-    """
-
     def __init__(self, tw_client: TwitterClient, page_delay: float = 1.5, seed_origin: str = "liked"):
         self.tw_client = tw_client
         self.page_delay = page_delay
         self.seed_origin = seed_origin
 
-        self._conversation_cache: dict[str, list[dict[str, Any]]] = {}
-        self._tweet_cache: dict[str, dict[str, Any]] = {}
+        self._tweets: dict[str, dict[str, Any]] = {}  # all known tweets (full data preferred over shallow stubs)
+        self._archived: set[str] = set()  # ids selected for the archive
         self._tombstones: dict[str, str] = {}
-        self._expanded_ids: set[str] = set()
-        self._queue: list[str] = []
         self._seed_ids: set[str] = set()
-        self._api_calls = 0
+        self._probe_ids: set[str] = set()  # fetch for graph knowledge only, don't archive
+        self._unresolvable: set[str] = set()  # requested and not returned; don't re-request
+        self._searched_pairs: set[tuple[str, str]] = set()
+        self._detail_fetched: set[str] = set()  # conversations fetched via TweetDetail fallback
 
     async def expand(self, seed_tweets: list[dict[str, Any]]) -> list[SimpleTweet]:
         """Entry point: expands raw seed tweet dicts (from get_all_likes /
         get_all_bookmarks) into SimpleTweets with origin and linking fields set."""
+        requests_before = self.tw_client.request_count
+
         for tweet in seed_tweets:
             if tid := tweet.get("id"):
                 self._seed_ids.add(tid)
-                self._tweet_cache[tid] = tweet
+                self._ingest(tweet)
+                self._archived.add(tid)
 
         logger.info(f"Starting expansion of {len(self._seed_ids)} seed tweets (origin={self.seed_origin})")
 
-        for tid in self._seed_ids:
-            self._enqueue(tid)
+        for iteration in range(MAX_ITERATIONS):
+            progress = await self._resolve_refs()
+            progress |= await self._discover_threads()
+            if not progress:
+                break
+        else:
+            logger.warning(f"Expansion hit MAX_ITERATIONS={MAX_ITERATIONS}, result may be incomplete")
 
-        while self._queue:
-            await self._expand_tweet(self._queue.pop(0))
-
-        tombstoned = sum(1 for tid in self._expanded_ids if tid in self._tombstones and tid not in self._tweet_cache)
+        tombstoned = sum(1 for tid in self._archived if tid not in self._tweets)
         logger.info(
-            f"Expansion complete: {len(self._expanded_ids)} tweets total "
-            f"({len(self._seed_ids)} seeds, {len(self._expanded_ids) - len(self._seed_ids)} discovered, "
-            f"{tombstoned} tombstoned), {self._api_calls} API calls"
+            f"Expansion complete: {len(self._archived)} tweets total "
+            f"({len(self._seed_ids)} seeds, {len(self._archived) - len(self._seed_ids)} discovered, "
+            f"{tombstoned} tombstoned), {self.tw_client.request_count - requests_before} HTTP requests"
         )
 
         return self._build_result()
 
-    def _enqueue(self, tweet_id: str):
-        if tweet_id not in self._expanded_ids:
-            self._expanded_ids.add(tweet_id)
-            self._queue.append(tweet_id)
+    def _ingest(self, tweet: dict[str, Any]):
+        """Add a tweet to the knowledge set; full data wins over shallow stubs.
+        Embedded quoted tweets are ingested as stubs so their content survives
+        even if the tweet is deleted before the batch lookup resolves it."""
+        tid = tweet.get("id")
+        if not tid:
+            return
+        existing = self._tweets.get(tid)
+        if existing is None or (existing.get("shallow") and not tweet.get("shallow")):
+            self._tweets[tid] = tweet
+        if (quoted := tweet.get("quoted_tweet")) and quoted.get("id"):
+            self._ingest(quoted)
 
-    async def _expand_tweet(self, tweet_id: str):
-        tweet = self._tweet_cache.get(tweet_id)
-        if not tweet:
-            if tweet_id in self._tombstones:
-                return  # already known unavailable, don't burn an API call
-            try:
-                await self._fetch_conversation_for_tweet(tweet_id)
-            except Exception as e:
-                if _is_rate_limit(e):
-                    raise
-                logger.warning(f"Tweet {tweet_id} unavailable, recording tombstone: {e}")
-                self._tombstones[tweet_id] = str(e)
-                return
-            tweet = self._tweet_cache.get(tweet_id)
+    # =========================================================================
+    # Phase 1: reference closure via batch lookup
+    # =========================================================================
+
+    def _pending_ref_ids(self) -> tuple[set[str], set[str]]:
+        """(refs to archive, probe-only ids) that still need resolution."""
+        done = {tid for tid, t in self._tweets.items() if not t.get("shallow")}
+        done |= set(self._tombstones) | self._unresolvable
+
+        refs: set[str] = set()
+        for tid in self._archived:
+            tweet = self._tweets.get(tid)
             if not tweet:
-                logger.warning(f"Tweet {tweet_id} not returned by API, recording tombstone")
-                self._tombstones.setdefault(tweet_id, "not returned by API")
-                return
+                continue
+            if tweet.get("shallow") and tid not in self._unresolvable:
+                refs.add(tid)  # re-resolve the stub itself: its own refs are unknown
+            refs.update(r for r in _refs_of(tweet) if r not in done)
 
+        probes = {p for p in self._probe_ids if p not in done and p not in refs}
+        return refs, probes
+
+    async def _resolve_refs(self) -> bool:
+        refs, probes = self._pending_ref_ids()
+        to_fetch = list(refs | probes)
+        if not to_fetch:
+            return False
+
+        logger.info(f"Batch-resolving {len(to_fetch)} referenced tweets ({len(refs)} to archive, {len(probes)} probes)")
+        result = await self.tw_client.get_tweets_by_ids(to_fetch, page_delay=self.page_delay)
+
+        for tweet in result.tweets:
+            self._ingest(tweet)
+
+        for tid in result.missing:
+            self._unresolvable.add(tid)
+            if self._tweets.get(tid, {}).get("shallow"):
+                # the embedded stub is all that's left of it — archive the stub, not a tombstone
+                self._tweets[tid].pop("shallow", None)
+                logger.info(f"Tweet {tid} vanished after being embedded; keeping quote-card stub")
+            elif tid in refs:
+                self._tombstones.setdefault(tid, TOMBSTONE_REASON_BATCH)
+                logger.info(f"Tweet {tid} unavailable, recording tombstone")
+
+        self._archived.update(refs)
+        return True
+
+    # =========================================================================
+    # Phase 2: thread discovery via OR-batched conversation search
+    # =========================================================================
+
+    def _pending_pairs(self) -> tuple[list[tuple[str, str]], dict[str, str]]:
+        """(author, conversation) pairs to search; protected-author conversations
+        go straight to the TweetDetail fallback (search can't see them)."""
+        pairs: list[tuple[str, str]] = []
+        fallback: dict[str, str] = {}  # conversation_id -> focal tweet id
+
+        for tid in self._archived:
+            tweet = self._tweets.get(tid)
+            if not tweet or not (tweet.get("reply_count") or 0):
+                continue
+            author = tweet.get("author_username")
+            conv = tweet.get("conversation_id") or tid
+            if not author:
+                continue
+            if tweet.get("author_protected"):
+                if conv not in self._detail_fetched:
+                    fallback[conv] = tid
+                continue
+            pair = (author, conv)
+            if pair not in self._searched_pairs:
+                pairs.append(pair)
+
+        return pairs, fallback
+
+    async def _discover_threads(self) -> bool:
+        pairs, fallback_convs = self._pending_pairs()
+
+        found: list[dict[str, Any]] = []
+        if pairs:
+            logger.info(f"Searching {len(pairs)} (author, conversation) pairs for thread tweets")
+            found = await self.tw_client.get_conversation_author_tweets(pairs, page_delay=self.page_delay)
+            self._searched_pairs.update(pairs)
+            for tweet in found:
+                self._ingest(tweet)
+
+        # search index gap detection: each searched pair must at least return the
+        # tweet that generated it — if not, fetch that conversation via TweetDetail
+        found_pairs = {(t.get("author_username"), t.get("conversation_id")) for t in found}
+        for author, conv in pairs:
+            if (author, conv) not in found_pairs and conv not in self._detail_fetched:
+                focal = next(
+                    (tid for tid in self._archived
+                     if (t := self._tweets.get(tid))
+                     and t.get("author_username") == author
+                     and (t.get("conversation_id") or tid) == conv),
+                    None,
+                )
+                if focal:
+                    logger.info(f"Search returned nothing for (@{author}, {conv}); falling back to TweetDetail")
+                    fallback_convs.setdefault(conv, focal)
+
+        for conv, focal in fallback_convs.items():
+            await self._fetch_conversation_fallback(conv, focal)
+
+        # always recompute chains: refs resolved in Phase 1 (parents, tombstoned
+        # bridges) can connect tweets found by earlier searches
+        archived_before = len(self._archived)
+        probes_before = len(self._probe_ids)
+        self._archive_thread_chains()
+
+        return (
+            bool(pairs or fallback_convs)
+            or len(self._archived) > archived_before
+            or len(self._probe_ids) > probes_before
+        )
+
+    async def _fetch_conversation_fallback(self, conversation_id: str, focal_tweet_id: str):
+        self._detail_fetched.add(conversation_id)
         try:
-            if conversation_id := tweet.get("conversation_id"):
-                await self._fetch_conversation(conversation_id, tweet_id)
-            else:
-                await self._fetch_conversation_for_tweet(tweet_id)
+            result = await self.tw_client.get_thread(focal_tweet_id, page_delay=self.page_delay)
         except Exception as e:
             if _is_rate_limit(e):
                 raise
-            # The tweet itself is known; losing its conversation context only
-            # limits thread/parent expansion, so continue with what we have.
-            logger.error(f"Conversation fetch failed for {tweet_id}, expanding without thread context: {e}")
-
-        # the fetch may have replaced a shallow quote-card stub with full TweetDetail data
-        tweet = self._tweet_cache.get(tweet_id, tweet)
-
-        self._expand_author_chain(tweet)
-        self._expand_parent_chain(tweet)
-        self._expand_quoted_tweet(tweet)
-        self._expand_linked_tweets(tweet)
-        self._expand_retweet(tweet)
-        self._check_seed_replies(tweet)
-
-    async def _fetch_conversation(self, conversation_id: str, focal_tweet_id: str):
-        cached = self._conversation_cache.get(conversation_id)
-        if cached is not None and any(t["id"] == focal_tweet_id for t in cached):
+            logger.error(f"TweetDetail fallback failed for conversation {conversation_id}: {e}")
             return
-        if cached is not None:
-            logger.debug(f"Conversation {conversation_id} cached but missing branch of {focal_tweet_id}, re-fetching")
+        for tweet in result.tweets:
+            self._ingest(tweet)
+        self._tombstones.update(result.tombstones)
 
-        logger.debug(f"Fetching conversation {conversation_id} (focal: {focal_tweet_id})")
-        self._api_calls += 1
-        result = await self.tw_client.get_thread(focal_tweet_id, page_delay=self.page_delay)
-        self._merge_thread_result(conversation_id, result.tweets, result.tombstones)
-        logger.debug(f"Conversation {conversation_id}: {len(result.tweets)} tweets cached")
+    def _archive_thread_chains(self):
+        """Archive author self-reply chains connected to already-archived tweets.
+        Recomputed over all known tweets each round — new knowledge (resolved
+        parents, tombstoned bridges) can connect previously dangling tweets."""
+        by_conv: dict[str, list[dict[str, Any]]] = {}
+        for tweet in self._tweets.values():
+            if conv := tweet.get("conversation_id"):
+                by_conv.setdefault(conv, []).append(tweet)
 
-    async def _fetch_conversation_for_tweet(self, tweet_id: str):
-        """Fetch conversation using a tweet ID when the conversation_id isn't known yet."""
-        logger.debug(f"Fetching tweet detail for {tweet_id}")
-        self._api_calls += 1
-        result = await self.tw_client.get_thread(tweet_id, page_delay=self.page_delay)
+        for conv, tweets in by_conv.items():
+            archived_here = [t for t in tweets if t["id"] in self._archived]
+            if not archived_here:
+                continue
+            for author in {t.get("author_username") for t in archived_here}:
+                self._archive_author_chain(author, tweets)
 
-        conv_id = next((t.get("conversation_id") for t in result.tweets if t.get("id") == tweet_id), None)
-        if not conv_id and result.tweets:
-            conv_id = result.tweets[0].get("conversation_id")
+    def _archive_author_chain(self, author: str, conv_tweets: list[dict[str, Any]]):
+        candidates = [t for t in conv_tweets if t.get("author_username") == author]
 
-        self._merge_thread_result(conv_id, result.tweets, result.tombstones)
-
-    def _merge_thread_result(self, conversation_id: str | None, tweets: list[dict[str, Any]], tombstones: dict[str, str]):
-        if conversation_id:
-            cached = self._conversation_cache.setdefault(conversation_id, [])
-            existing_ids = {t["id"] for t in cached}
-            cached.extend(t for t in tweets if t["id"] not in existing_ids)
-
-        # TweetDetail data overwrites cached entries: timeline payloads nest quotes
-        # only one level deep, so a quote-card stub cached earlier is missing its own
-        # quoted_tweet_id and would break quote-of-quote chains.
-        for tweet in tweets:
-            if tid := tweet.get("id"):
-                self._tweet_cache[tid] = tweet
-
-        self._tombstones.update(tombstones)
-
-    def _expand_author_chain(self, tweet: dict[str, Any]):
-        """Find all self-replies by the same author connected to this tweet, both directions."""
-        conversation_id = tweet.get("conversation_id")
-        if not conversation_id:
-            return
-
-        conv_tweets = self._conversation_cache.get(conversation_id, [])
-        if not conv_tweets:
-            return
-
-        author = tweet.get("author_username")
-        if not author:
-            return
-
-        by_id = {t["id"]: t for t in conv_tweets}
-        chain_ids = set()
-
-        current = tweet
-        while current and current.get("author_username") == author:
-            chain_ids.add(current["id"])
-            parent = by_id.get(current.get("in_reply_to_status_id"))
-            if not parent or parent.get("author_username") != author:
-                break
-            current = parent
-
+        chain: set[str] = {t["id"] for t in candidates if t["id"] in self._archived}
         changed = True
         while changed:
             changed = False
-            for t in conv_tweets:
-                if t.get("author_username") != author or t["id"] in chain_ids:
+            for t in candidates:
+                if t["id"] in chain:
                     continue
-                if t.get("in_reply_to_status_id") in chain_ids:
-                    chain_ids.add(t["id"])
+                parent_id = t.get("in_reply_to_status_id")
+                # connected through the chain, or the parent is gone entirely
+                # (deleted bridge — benefit of the doubt keeps the content)
+                parent_gone = parent_id in self._tombstones or (
+                    parent_id in self._unresolvable and parent_id not in self._tweets
+                )
+                if parent_id in chain or parent_gone:
+                    chain.add(t["id"])
                     changed = True
+                elif parent_id and parent_id not in self._tweets:
+                    # unknown parent: probe it so the next round can decide
+                    self._probe_ids.add(parent_id)
 
-        for tid in chain_ids:
-            if tid not in self._expanded_ids and self._tweet_cache.get(tid):
-                self._enqueue(tid)
+        for tid in chain:
+            if tid not in self._archived:
+                self._archived.add(tid)
+                logger.debug(f"Thread tweet archived: {tid} by @{author}")
 
-    def _expand_parent_chain(self, tweet: dict[str, Any]):
-        """Walk up the reply chain to the conversation root."""
-        conversation_id = tweet.get("conversation_id")
-        if not conversation_id:
-            return
-
-        by_id = {t["id"]: t for t in self._conversation_cache.get(conversation_id, [])}
-
-        current = tweet
-        while current:
-            parent_id = current.get("in_reply_to_status_id")
-            if not parent_id:
-                break
-
-            self._enqueue(parent_id)
-
-            parent = by_id.get(parent_id)
-            if not parent:
-                break
-            self._expand_author_chain(parent)
-            current = parent
-
-    def _expand_quoted_tweet(self, tweet: dict[str, Any]):
-        quoted = tweet.get("quoted_tweet")
-        quoted_id = tweet.get("quoted_tweet_id")
-
-        if quoted:
-            if qid := quoted.get("id"):
-                self._tweet_cache.setdefault(qid, quoted)
-                self._enqueue(qid)
-        elif quoted_id:
-            self._enqueue(quoted_id)
-
-    def _expand_linked_tweets(self, tweet: dict[str, Any]):
-        for linked_id in tweet.get("linked_tweet_ids") or []:
-            self._enqueue(linked_id)
-
-    def _expand_retweet(self, tweet: dict[str, Any]):
-        if tweet.get("is_retweet") and (retweeted_id := tweet.get("retweeted_tweet_id")):
-            self._enqueue(retweeted_id)
-
-    def _check_seed_replies(self, tweet: dict[str, Any]):
-        """Pull in any replies to this tweet, within its conversation, that the user liked/bookmarked."""
-        conversation_id = tweet.get("conversation_id")
-        if not conversation_id:
-            return
-
-        for t in self._conversation_cache.get(conversation_id, []):
-            tid = t.get("id")
-            if tid and t.get("in_reply_to_status_id") == tweet["id"] and tid in self._seed_ids:
-                self._enqueue(tid)
+    # =========================================================================
+    # Result assembly
+    # =========================================================================
 
     def _build_result(self) -> list[SimpleTweet]:
         result = []
 
-        for tweet_id in self._expanded_ids:
-            tweet_data = self._tweet_cache.get(tweet_id)
+        for tweet_id in self._archived:
+            tweet_data = self._tweets.get(tweet_id)
             if not tweet_data:
                 result.append(self._build_tombstone(tweet_id))
                 continue
@@ -285,7 +312,7 @@ class TweetExpander:
         stub = {"id": tweet_id}
         simple = SimpleTweet(
             id=tweet_id,
-            text=self._tombstones.get(tweet_id, "unavailable"),
+            text=self._tombstones.get(tweet_id, TOMBSTONE_REASON_BATCH),
             author_username="unknown",
             author_name="unknown",
             is_tombstone=True,
@@ -297,42 +324,28 @@ class TweetExpander:
     def _determine_origin(self, tweet: dict[str, Any]) -> str:
         tid = tweet.get("id")
 
-        if tid in self._seed_ids:
-            return self.seed_origin
-
-        for expanded_id in self._expanded_ids:
-            cached = self._tweet_cache.get(expanded_id)
+        for archived_id in self._archived:
+            cached = self._tweets.get(archived_id)
             if cached and cached.get("quoted_tweet_id") == tid:
                 return "quoted"
 
-        for expanded_id in self._expanded_ids:
-            cached = self._tweet_cache.get(expanded_id)
+        for archived_id in self._archived:
+            cached = self._tweets.get(archived_id)
             if cached and cached.get("retweeted_tweet_id") == tid:
                 return "retweet"
 
-        for expanded_id in self._expanded_ids:
-            cached = self._tweet_cache.get(expanded_id)
+        for archived_id in self._archived:
+            cached = self._tweets.get(archived_id)
             if cached and tid in (cached.get("linked_tweet_ids") or []):
                 return "linked"
 
-        for expanded_id in self._expanded_ids:
-            cached = self._tweet_cache.get(expanded_id)
+        for archived_id in self._archived:
+            cached = self._tweets.get(archived_id)
             if cached and cached.get("in_reply_to_status_id") == tid:
                 if cached.get("author_username") != tweet.get("author_username"):
                     return "parent"
 
-        conversation_id = tweet.get("conversation_id")
-        if conversation_id:
-            for seed_id in self._seed_ids:
-                seed = self._tweet_cache.get(seed_id)
-                if (
-                    seed
-                    and seed.get("conversation_id") == conversation_id
-                    and seed.get("author_username") == tweet.get("author_username")
-                ):
-                    return "thread"
-
-        return "thread"  # default: part of a thread expansion
+        return "thread"
 
     def _find_discovered_via(self, tweet: dict[str, Any], _seen: set[str] | None = None) -> str | None:
         """Find which seed tweet led to discovering this tweet."""
@@ -345,17 +358,17 @@ class TweetExpander:
         conversation_id = tweet.get("conversation_id")
         if conversation_id:
             for seed_id in self._seed_ids:
-                seed = self._tweet_cache.get(seed_id)
+                seed = self._tweets.get(seed_id)
                 if seed and seed.get("conversation_id") == conversation_id:
                     return seed_id
 
-        for expanded_id in self._expanded_ids:
-            cached = self._tweet_cache.get(expanded_id)
+        for archived_id in self._archived:
+            cached = self._tweets.get(archived_id)
             if not cached:
                 continue
             if cached.get("quoted_tweet_id") == tid or tid in (cached.get("linked_tweet_ids") or []):
-                if expanded_id in self._seed_ids:
-                    return expanded_id
+                if archived_id in self._seed_ids:
+                    return archived_id
                 return self._find_discovered_via(cached, seen)
 
         return None
@@ -366,12 +379,11 @@ class TweetExpander:
             simple.thread_position = "standalone"
             return
 
-        conv_tweets = self._conversation_cache.get(conversation_id, [])
         author = tweet_data.get("author_username")
-
         has_self_replies = any(
             t.get("in_reply_to_status_id") == tweet_data["id"] and t.get("author_username") == author
-            for t in conv_tweets
+            for t in self._tweets.values()
+            if t.get("conversation_id") == conversation_id
         )
         is_root = not tweet_data.get("in_reply_to_status_id")
 

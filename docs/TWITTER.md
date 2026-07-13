@@ -63,26 +63,29 @@ If a tweet later gets liked/bookmarked directly, its origin is upgraded from the
 
 Tweets that exist in the reply graph but are unavailable (deleted, protected account, suspended author) are recorded as tombstone rows: `status = 'tombstone'`, with the reason in `text` and the URL as `x.com/i/status/<id>`. They are not uploaded to Telegram or embedded, but the DB records that context existed and was already gone at archive time.
 
-## API call estimate
+## Fetch strategy and API cost
 
-The archiver minimizes calls by caching conversations:
+Expansion runs in phases designed around request cost (measurements in `X_RESEARCH.md`):
 
-| Phase | Calls | Notes |
-|-------|-------|-------|
-| Auth verification | 1 | `verify_credentials` |
-| Fetch likes | `ceil(total_likes / 20)` | Paginated, 20 per page |
-| Expand conversations | 1 per unique `conversation_id` | Cached — liking 5 tweets in the same thread = 1 call, not 5 |
-| Expand quoted tweets | 1 per quoted tweet in a different conversation | Skipped if conversation already cached |
+| Phase | Endpoint | Cost |
+|-------|----------|------|
+| Seeds | Likes / Bookmarks timeline | `ceil(new_items / 20)`, early-stops on known IDs |
+| Reference closure | `TweetResultsByRestIds` (batch) | up to 100 quoted/linked/retweeted/parent IDs per request, repeated per graph depth level |
+| Thread discovery | `SearchTimeline` with OR-batched `(from:author conversation_id:conv)` groups | ~5 conversations per request; returns only the author's tweets, no reply noise |
+| Fallback | `TweetDetail` with relevance-stop pagination | only for protected authors (invisible to search) or detected search-index gaps |
 
-**Examples:**
-- 100 likes, all standalone tweets, no quotes → `5 + 100 = ~105 calls`
-- 100 likes, 60 unique conversations, 10 quotes in new conversations → `5 + 60 + 10 = ~75 calls`
-- 100 likes, 20 unique conversations (lots of thread/reply activity) → `5 + 20 = ~25 calls`
-- 1000 likes, 500 unique conversations, 50 quotes → `50 + 500 + 50 = ~600 calls`
+Key properties:
+- A tweet with `reply_count == 0` is provably standalone: zero thread-discovery requests.
+- A viral quoted tweet costs one search page, not a crawl of its reply section.
+- Deleted/unavailable references surface via batch lookup and become tombstone rows.
+- Every HTTP request is counted (`TwitterClient.request_count`) and logged per expansion.
+- On 429 the client sleeps until `x-rate-limit-reset` (capped at 16 min) and retries, so long backfills survive bucket exhaustion.
 
-Subsequent runs (daemon/--once) only fetch new likes since the last run and skip tweets already in the DB, so ongoing costs are minimal.
+**Measured:** 5 likes with 2 quote chains and 2 threads = 6 requests total (the previous design used ~24). A 4-level quote chain hanging off a 4,700-reply viral tweet = 10 requests.
 
-Thread pagination is uncapped: a conversation with heavy reply activity (viral tweet) can take many TweetDetail pages. Each page beyond the first costs one call plus `page_delay`.
+**History backfill tip:** your official Twitter data export (`like.js`) contains every like ID ever. Feeding those through the batch endpoint costs ~1 request per 100 likes before expansion — far cheaper than paginating the Likes timeline. Bookmarks are not included in exports.
+
+Query IDs rotate every few weeks. If endpoints start returning 404, run `uv run python scripts/harvest_twitter_query_ids.py` (public CDN, zero API cost) and update `QUERY_IDS` in `client.py`.
 
 ## Database schema
 
