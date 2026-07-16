@@ -1,110 +1,91 @@
-import argparse
 import asyncio
 import logging
 import sys
 
+from social_archiver.core.cli import build_parser
+from social_archiver.core.config import ConfigError
 from social_archiver.core.database import Database
+from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
+from social_archiver.core.milvus_manager import MilvusManager
+from social_archiver.core.scheduler import DaemonScheduler
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.core.utils import setup_logging
 from social_archiver.llm.factory import create_vlm_client
 from social_archiver.platforms.instagram import config
+from social_archiver.platforms.instagram.archiver import ArchiveJob
 from social_archiver.platforms.instagram.client import InstagramClient
-from social_archiver.platforms.instagram.downloader import MediaDownloader
-from social_archiver.platforms.instagram.processor import Processor
-from social_archiver.platforms.instagram.scheduler import Scheduler
+from social_archiver.platforms.instagram.embedder import EmbedJob
+from social_archiver.platforms.instagram.port import InstagramPort
 
 logger = logging.getLogger(__name__)
 
+PORT = InstagramPort()
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Instagram to Telegram Archiver")
-    parser.add_argument("--once", action="store_true", help="Run once and exit")
-    parser.add_argument("--history", action="store_true", help="Download all historical content")
-    parser.add_argument("--init", action="store_true", help="First-time setup: fetch full history then switch to daemon mode")
-    parser.add_argument("--daemon", action="store_true", help="Run in daemon mode (default)")
-    parser.add_argument("--category", choices=["saved", "likes", "shared"], help="Process only this category")
-    return parser.parse_args()
+MILVUS_COLLECTIONS = {"likes": "instagram_likes", "saved": "instagram_saved", "shared": "instagram_shared"}
 
 
-async def init_embedding_system(tg_client: TelegramClient):
-    if not config.EMBEDDING_ENABLED:
-        return None, None
-
-    try:
-        from social_archiver.core.milvus_manager import MilvusManager
-        from social_archiver.platforms.instagram.embedding_processor import EmbeddingProcessor
-
-        vlm_client, vlm_model_name = create_vlm_client(config.VLM_PROVIDER)
-
-        milvus_manager = MilvusManager(
-            uri=config.INSTAGRAM_MILVUS_URI,
-            collections={"likes": "instagram_likes", "saved": "instagram_saved", "shared": "instagram_shared"},
-        )
-        milvus_manager.initialize_collections()
-        logger.info(f"Embedding system initialized: provider={config.VLM_PROVIDER}, model={vlm_model_name}")
-        return EmbeddingProcessor(vlm_client, milvus_manager), milvus_manager
-
-    except Exception as e:
-        error_msg = f"Failed to initialize embedding system: {e}"
-        logger.error(error_msg)
-        logger.warning("Continuing without embeddings")
-        try:
-            await tg_client.send_error_notification(type(e).__name__, "embedding_init", str(e))
-        except Exception as notify_error:
-            logger.error(f"Failed to send error notification: {notify_error}")
-        return None, None
-
-
-async def main():
-    setup_logging(config.LOG_FILE)
-
-    try:
-        config.validate_config()
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        sys.exit(1)
-
-    args = parse_args()
-    logger.info("Starting Instagram Archiver")
-
+async def archive(fetch_all: bool = False, category: str | None = None):
+    config.validate_archive()
     ig_client = InstagramClient()
-    tg_client = TelegramClient()
-
-    try:
-        ig_client.login()
-    except Exception as e:
-        logger.error(f"Failed to login to Instagram: {e}")
-        sys.exit(1)
-
+    ig_client.login()
     async with Database(config.DATABASE_PATH) as db:
-        downloader = MediaDownloader()
-        embedding_processor, milvus_manager = await init_embedding_system(tg_client)
+        await ArchiveJob(ig_client, db, PORT, TelegramClient()).run(fetch_all, category)
 
-        processor = Processor(ig_client, tg_client, db, downloader, embedding_processor)
-        scheduler = Scheduler(processor)
-        categories = [args.category] if args.category else None
 
-        try:
-            if args.init:
-                logger.info("Running --init: fetching full history then starting daemon")
-                await scheduler.run_once(fetch_all=True, categories=categories)
-                logger.info("History fetch complete. Starting daemon mode...")
-                scheduler.run_daemon()
-            elif args.once:
-                await scheduler.run_once(fetch_all=args.history, categories=categories)
-            elif args.history:
-                logger.info("Running history mode")
-                await scheduler.run_once(fetch_all=True, categories=categories)
-            else:
-                scheduler.run_daemon()
-        finally:
-            if milvus_manager:
-                milvus_manager.close()
+async def upload(retry_failed: bool = False):
+    config.validate_upload()
+    async with Database(config.DATABASE_PATH) as db:
+        await UploadJob(db, TelegramClient(), PORT).run(retry_failed)
+        await cleanup_downloads(db, PORT)
+
+
+async def embed(retry_failed: bool = False):
+    config.validate_embed()
+    vlm_client, model_name = create_vlm_client(config.VLM_PROVIDER)
+    logger.info(f"Embedding with provider={config.VLM_PROVIDER}, model={model_name}")
+
+    milvus = MilvusManager(uri=config.INSTAGRAM_MILVUS_URI, collections=MILVUS_COLLECTIONS)
+    milvus.initialize_collections()
+    try:
+        async with Database(config.DATABASE_PATH) as db:
+            await EmbedJob(db, vlm_client, milvus, PORT).run(retry_failed)
+            await cleanup_downloads(db, PORT)
+    finally:
+        milvus.close()
+
+
+async def run_all(fetch_all: bool = False):
+    jobs = {"archive": lambda: archive(fetch_all), "upload": upload}
+    if config.EMBEDDING_ENABLED:
+        jobs["embed"] = embed
+    await run_jobs(jobs)
+
+
+def main():
+    args = build_parser("Instagram archiver", categories=("likes", "saved", "shared")).parse_args()
+    setup_logging(config.LOG_FILE)
+    logger.info(f"Instagram archiver: {args.command}")
+
+    match args.command:
+        case "archive":
+            asyncio.run(archive(args.history, args.category))
+        case "upload":
+            asyncio.run(upload(args.retry_failed))
+        case "embed":
+            asyncio.run(embed(args.retry_failed))
+        case "run":
+            asyncio.run(run_all(args.history))
+        case "daemon":
+            config.validate_archive()
+            config.validate_upload()
+            DaemonScheduler(run_all, config.CHECK_INTERVAL_MINUTES).run_daemon()
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         logger.info("Shutting down")
-        sys.exit(0)
+    except ConfigError as e:
+        logger.error(str(e))
+        sys.exit(1)

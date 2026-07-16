@@ -16,19 +16,19 @@ Archives your Twitter/X liked and bookmarked tweets to Telegram with full thread
    TWITTER_CHAT_LIKES=-your_chat_id
    ```
 
-3. Run:
+3. Run (three independent, resumable jobs — see the README for the job model):
    ```bash
-   # First time — fetch all historical likes + expand
-   uv run python -m social_archiver.platforms.twitter --init
+   # First time — fetch all historical likes + expand, then keep the daemon running
+   uv run python -m social_archiver.platforms.twitter run --history
+   uv run python -m social_archiver.platforms.twitter daemon
 
-   # One-shot (recent likes only)
-   uv run python -m social_archiver.platforms.twitter --once
+   # Everything once (recent likes only)
+   uv run python -m social_archiver.platforms.twitter run
 
-   # Full history without daemon
-   uv run python -m social_archiver.platforms.twitter --history
-
-   # Daemon mode (checks every CHECK_INTERVAL_MINUTES)
-   uv run python -m social_archiver.platforms.twitter --daemon
+   # Or job by job, whenever there's time
+   uv run python -m social_archiver.platforms.twitter archive
+   uv run python -m social_archiver.platforms.twitter upload
+   uv run python -m social_archiver.platforms.twitter embed
    ```
 
 ## What it does

@@ -563,7 +563,7 @@ httpx = "^0.27"  # async HTTP client for Twitter API
 
 The existing Instagram archiver has an optional embeddings system using:
 - VLM (Gemini via OpenRouter) for visual description
-- Text embedding model (Qwen3 via OpenRouter) for vector generation
+- Text embedding model (jina-embeddings-v5-omni-small, local) for vector generation
 - Milvus for vector storage and similarity search
 
 ### Milvus Collections
@@ -598,7 +598,7 @@ Same flow as Instagram:
 1. Download media (photo/video)
 2. Generate VLM description using Gemini
 3. Combine tweet text + VLM description
-4. Generate text embedding using Qwen3
+4. Generate text embedding using jina-embeddings-v5-omni-small
 5. Store in Milvus with metadata
 
 ### Twitter-specific Metadata in Milvus

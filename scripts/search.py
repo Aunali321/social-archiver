@@ -75,16 +75,15 @@ async def _display(platform: str, candidates: list[dict]):
     async with Database(PLATFORMS[platform]["db_path"]) as db:
         for i, candidate in enumerate(candidates, 1):
             item_id = candidate.get("item_id")
-            row = await db.get_item(item_id) if item_id else None
+            item = await db.get(item_id) if item_id else None
 
             print(f"{i}. item_id={item_id}")
-            if row:
-                print(f"   Author: @{row['author_username']}")
-                print(f"   URL: {row['post_url']}")
-                text = (row.get("text") or "")[:150]
-                print(f"   Text: {text}")
-                if row.get("vlm_description"):
-                    print(f"   VLM: {row['vlm_description'][:150]}")
+            if item:
+                print(f"   Author: @{item.author_username}")
+                print(f"   URL: {item.post_url}")
+                print(f"   Text: {(item.text or '')[:150]}")
+                if item.vlm_description:
+                    print(f"   VLM: {item.vlm_description[:150]}")
             else:
                 print(f"   Caption: {(candidate.get('caption') or '')[:150]} (not in DB)")
             print()
@@ -92,12 +91,15 @@ async def _display(platform: str, candidates: list[dict]):
 
 async def show_stats(platform: str):
     async with Database(PLATFORMS[platform]["db_path"]) as db:
-        stats = await db.get_stats(platform)
+        stats = await db.stats(platform)
 
         print(f"\n{platform} stats:\n")
         for category, data in stats.items():
-            coverage = data["embedded"] / data["uploaded"] * 100 if data["uploaded"] else 0
-            print(f"{category.upper()}: total={data['total']} uploaded={data['uploaded']} embedded={data['embedded']} ({coverage:.1f}%)")
+            coverage = data["embedded"] / data["archived"] * 100 if data["archived"] else 0
+            print(
+                f"{category.upper()}: total={data['total']} archived={data['archived']} "
+                f"uploaded={data['uploaded']} embedded={data['embedded']} ({coverage:.1f}%)"
+            )
 
 
 def init_collections(platform: str):

@@ -76,7 +76,9 @@ class MilvusManager:
         text: str,
         media_type: str,
         resource_index: int | None = None,
-        metadata: dict[str, Any] | None = None,
+        caption: str | None = None,
+        username: str | None = None,
+        code: str | None = None,
     ) -> bool:
         collection_name = self.collections.get(category)
         if not collection_name:
@@ -92,12 +94,12 @@ class MilvusManager:
                 "media_type": media_type[:16] if media_type else "text",
                 "resource_index": resource_index if resource_index is not None else -1,
                 "created_at": datetime.now().isoformat(),
-                "caption": (metadata.get("caption") or "")[:65000] if metadata else "",
-                "username": (metadata.get("username") or "")[:256] if metadata else "",
-                "code": (metadata.get("code") or "")[:64] if metadata else "",
+                "caption": (caption or "")[:65000],
+                "username": (username or "")[:256],
+                "code": (code or "")[:64],
             }
-            self.client.insert(collection_name=collection_name, data=[data])
-            logger.debug(f"Inserted embedding for item_id={item_id}")
+            self.client.upsert(collection_name=collection_name, data=[data])
+            logger.debug(f"Upserted embedding for item_id={item_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to insert embedding: {e}")

@@ -5,6 +5,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+class ConfigError(ValueError):
+    """Configuration problem the user must fix; reported without a traceback."""
+
+
+def require(**values: str | None):
+    """Raise unless every named value is set: require(SOME_TOKEN=SOME_TOKEN, ...)."""
+    if missing := [name for name, value in values.items() if not value]:
+        raise ConfigError(f"Missing required environment variables: {', '.join(missing)}")
+
 # Telegram (shared bot, per-platform chat IDs live in each platform's config)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ERRORS = int(os.getenv("TELEGRAM_CHAT_ERRORS", "0")) or None
@@ -42,13 +52,6 @@ LOGS_DIR = BASE_DIR / "logs"
 # Retry
 MAX_DOWNLOAD_RETRIES = 3
 RETRY_BACKOFF_BASE = 30  # seconds
-BACKOFF_DELAYS = {
-    1: 30,
-    2: 120,
-    3: 300,
-    4: 900,
-}
 
 # Logging
-LOG_LEVEL = "DEBUG"
 LOG_ROTATION_DAYS = 30

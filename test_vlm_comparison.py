@@ -4,7 +4,6 @@ Fetches a few media tweets from likes, downloads media, runs all models.
 """
 import asyncio
 import base64
-import hashlib
 import httpx
 import json
 import os
@@ -292,7 +291,7 @@ async def main():
             print(f"  {path.name} ({media_type}, {size_mb:.1f}MB) — @{tweet['author_username']}")
             # Skip large videos (>15MB) to avoid timeouts
             if size_mb > 15:
-                print(f"    ^ Skipping (too large for inline base64)")
+                print("    ^ Skipping (too large for inline base64)")
                 test_items.pop()
 
     if not test_items:
@@ -325,7 +324,7 @@ async def main():
                 print(f"    Time: {result['time_s']}s | "
                       f"Tokens: {result.get('prompt_tokens', '?')} in / "
                       f"{result.get('completion_tokens', '?')} out")
-                print(f"    Description:")
+                print("    Description:")
                 # Indent the description
                 for line in result["description"].split("\n"):
                     print(f"      {line}")

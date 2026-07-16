@@ -12,4 +12,4 @@ RUN uv sync --frozen
 
 RUN mkdir -p downloads/instagram downloads/twitter logs data
 
-CMD ["uv", "run", "python", "-m", "social_archiver.platforms.instagram"]
+CMD ["uv", "run", "python", "-m", "social_archiver.platforms.instagram", "daemon"]

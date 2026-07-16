@@ -1,6 +1,8 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 from google import genai
 from google.genai import types
@@ -9,6 +11,20 @@ from pydantic import BaseModel, Field
 from social_archiver.llm._backoff import retry_wait
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TextPart:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class MediaPart:
+    path: Path
+    mime_type: str
+
+
+type ThreadPart = TextPart | MediaPart
 
 
 class MediaCaption(BaseModel):
@@ -171,19 +187,17 @@ class VertexVLMClient:
 
         return None
 
-    async def describe_thread(self, parts_data: list[dict]) -> ThreadCaptions | None:
-        """Describe all media in a thread with interleaved text + media.
-
-        parts_data: list of dicts, each either
-          {"type": "text", "text": "...", "tweet_id": "..."}
-          {"type": "media", "path": Path, "mime_type": "image/jpeg"|..., "tweet_id": "...", "media_index": 0}
-        """
+    async def describe_thread(self, parts: Sequence[ThreadPart]) -> ThreadCaptions | None:
+        """Describe all media in a thread of interleaved text and media parts.
+        Text parts carry the [tweet_id:...] labels the model echoes back in
+        each caption, so no other bookkeeping travels with the media."""
         sdk_parts = []
-        for p in parts_data:
-            if p["type"] == "text":
-                sdk_parts.append(types.Part.from_text(text=p["text"]))
-            elif p["type"] == "media":
-                sdk_parts.append(types.Part.from_bytes(data=p["path"].read_bytes(), mime_type=p["mime_type"]))
+        for part in parts:
+            match part:
+                case TextPart(text=text):
+                    sdk_parts.append(types.Part.from_text(text=text))
+                case MediaPart(path=path, mime_type=mime_type):
+                    sdk_parts.append(types.Part.from_bytes(data=path.read_bytes(), mime_type=mime_type))
 
         sdk_parts.append(types.Part.from_text(text=THREAD_DESCRIPTION_PROMPT))
 

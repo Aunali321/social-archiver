@@ -12,7 +12,7 @@ services:
       # Uncomment if you set CLEANUP_DOWNLOADS=false in .env to persist downloads
       # - ./downloads:/app/downloads
     restart: unless-stopped
-    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram"]
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram", "daemon"]
 
   # One-time history fetch (run manually)
   instagram-archiver-history:
@@ -23,7 +23,7 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     profiles: ["history"]  # Won't start automatically
-    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram", "--history", "--once"]
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.instagram", "run", "--history"]
 
   twitter-archiver:
     build: .
@@ -34,7 +34,7 @@ services:
       - ./data:/app/data
       # - ./downloads:/app/downloads
     restart: unless-stopped
-    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter"]
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter", "daemon"]
 
   # One-time history fetch (run manually)
   twitter-archiver-history:
@@ -45,4 +45,4 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     profiles: ["history"]  # Won't start automatically
-    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter", "--history", "--once"]
+    command: ["uv", "run", "python", "-m", "social_archiver.platforms.twitter", "run", "--history"]

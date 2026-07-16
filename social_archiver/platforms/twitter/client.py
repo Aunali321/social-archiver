@@ -15,12 +15,14 @@ from urllib.parse import urlencode
 
 import httpx
 
-from social_archiver.platforms.twitter import config
+from social_archiver.platforms.twitter import config, content
 
 logger = logging.getLogger(__name__)
 
-# Query IDs: primaries verified live 2026-07-13; fallbacks harvested from x.com public
-# JS bundles the same night (see X_RESEARCH.md). These rotate — harvest again on 404s.
+# Query IDs for the LOGGED-IN x.com app (the one these auth cookies target). The
+# logged-out site is a separate TanStack rewrite with its own, incompatible query
+# IDs — do NOT harvest these from the public logged-out bundle; its IDs 422 against
+# the authenticated backend. These rotate — reharvest from the logged-in app on 404s.
 QUERY_IDS = {
     "Bookmarks": "RV1g3b8n_SGOHwkqKYSCFw",
     "BookmarkFolderTimeline": "KJIQpsvxrTfRIlbaRIySHQ",
@@ -92,9 +94,20 @@ TIMELINE_FEATURES = {
     "responsive_web_media_download_video_enabled": False,
 }
 
-BOOKMARKS_FEATURES = {**TIMELINE_FEATURES, "graphql_timeline_v2_bookmark_timeline": True}
+# So an Article's full body comes inline on the tweet result, with no extra per-article fetch.
+ARTICLE_FEATURES = {
+    "articles_rest_api_enabled": True,
+    "responsive_web_twitter_article_plain_text_enabled": True,
+}
 
-LIKES_FEATURES = TIMELINE_FEATURES.copy()
+ARTICLE_FIELD_TOGGLES = {
+    "withArticleRichContentState": True,
+    "withArticlePlainText": True,
+}
+
+BOOKMARKS_FEATURES = {**TIMELINE_FEATURES, **ARTICLE_FEATURES, "graphql_timeline_v2_bookmark_timeline": True}
+
+LIKES_FEATURES = {**TIMELINE_FEATURES, **ARTICLE_FEATURES}
 
 TWEET_DETAIL_FEATURES = {
     **TIMELINE_FEATURES,
@@ -445,7 +458,7 @@ class TwitterClient:
             }
             query_ids = self._get_query_ids("TweetResultsByRestIds")
             success, data, error = await self._graphql_get_with_fallbacks(
-                "TweetResultsByRestIds", query_ids, variables, TWEET_DETAIL_FEATURES
+                "TweetResultsByRestIds", query_ids, variables, TWEET_DETAIL_FEATURES, field_toggles=ARTICLE_FIELD_TOGGLES
             )
             if not success:
                 raise RuntimeError(f"TweetResultsByRestIds failed for {len(chunk)} ids: {error}")
@@ -569,7 +582,9 @@ class TwitterClient:
             variables["cursor"] = cursor
 
         query_ids = self._get_query_ids("Bookmarks")
-        success, data, error = await self._graphql_get_with_fallbacks("Bookmarks", query_ids, variables, BOOKMARKS_FEATURES)
+        success, data, error = await self._graphql_get_with_fallbacks(
+            "Bookmarks", query_ids, variables, BOOKMARKS_FEATURES, field_toggles=ARTICLE_FIELD_TOGGLES
+        )
         if not success:
             return {"success": False, "error": error, "tweets": []}
 
@@ -627,7 +642,9 @@ class TwitterClient:
             variables["cursor"] = cursor
 
         query_ids = self._get_query_ids("Likes")
-        success, data, error = await self._graphql_get_with_fallbacks("Likes", query_ids, variables, LIKES_FEATURES)
+        success, data, error = await self._graphql_get_with_fallbacks(
+            "Likes", query_ids, variables, LIKES_FEATURES, field_toggles=ARTICLE_FIELD_TOGGLES
+        )
         if not success:
             return {"success": False, "error": error, "tweets": []}
 
@@ -782,25 +799,6 @@ def _extract_linked_tweet_ids(result: dict, tweet_id: str, quoted_tweet_id: str 
     return linked
 
 
-def _extract_tweet_text(result: dict | None) -> str | None:
-    """Extract tweet text, handling note tweets and articles."""
-    if not result:
-        return None
-
-    note = result.get("note_tweet", {}).get("note_tweet_results", {}).get("result", {})
-    if note:
-        for container in (note, note.get("content", {})):
-            for key in ("text", "richtext", "rich_text"):
-                val = container.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-                if isinstance(val, dict) and val.get("text", "").strip():
-                    return val["text"].strip()
-
-    full_text = result.get("legacy", {}).get("full_text", "")
-    return full_text if full_text else None
-
-
 def _extract_media(result: dict | None) -> list[dict[str, Any]]:
     if not result:
         return []
@@ -861,7 +859,7 @@ def _map_tweet_result(result: dict | None) -> dict[str, Any] | None:
     if not tweet_id or not username:
         return None
 
-    text = _extract_tweet_text(result)
+    text = content.extract_tweet_text(result)
     if not text:
         return None
 
@@ -918,6 +916,7 @@ def _map_tweet_result(result: dict | None) -> dict[str, Any] | None:
         "linked_tweet_ids": _extract_linked_tweet_ids(result, tweet_id, quoted_tweet_id) or None,
         "media": media if media else None,
         "quoted_tweet": quoted_tweet,
+        "is_article": content.is_article(result),
     }
 
 

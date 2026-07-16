@@ -43,7 +43,7 @@ async def main():
     client = TelegramClient("delete_session", int(API_ID), API_HASH)
     await client.start()
     
-    print(f"Connected to Telegram")
+    print("Connected to Telegram")
     print(f"Target channel ID: {CHAT_ID}")
     print(f"Cutoff date: {CUTOFF_DATE.strftime('%Y-%m-%d')}")
     print(f"Will delete messages sent on or before {CUTOFF_DATE.strftime('%Y-%m-%d')}")
@@ -97,14 +97,14 @@ async def main():
     print(f"Cutoff date: {CUTOFF_DATE}")
     
     if first_kept_message:
-        print(f"\nFirst message KEPT (not deleted):")
+        print("\nFirst message KEPT (not deleted):")
         print(f"  Date (UTC): {first_kept_message.date}")
         print(f"  Date (IST): {first_kept_message.date.strftime('%Y-%m-%d %H:%M:%S')} UTC + 5:30")
         caption_preview = (first_kept_message.text or first_kept_message.message or "")[:100]
         print(f"  Caption preview: {caption_preview}...")
     
     if last_deleted_message:
-        print(f"\nLast message TO BE DELETED:")
+        print("\nLast message TO BE DELETED:")
         print(f"  Date (UTC): {last_deleted_message.date}")
         caption_preview = (last_deleted_message.text or last_deleted_message.message or "")[:100]
         print(f"  Caption preview: {caption_preview}...")

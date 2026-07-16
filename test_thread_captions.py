@@ -13,24 +13,17 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from social_archiver.core.downloader import download_urls
+from social_archiver.core.media_kind import guess_mime_type
+from social_archiver.platforms.twitter.client import TwitterClient
+from social_archiver.platforms.twitter.expander import TweetExpander
+from social_archiver.llm.vertex_client import MediaPart, TextPart, VertexVLMClient
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("test")
-
-from social_archiver.platforms.twitter.client import TwitterClient
-from social_archiver.platforms.twitter.expander import TweetExpander
-from social_archiver.platforms.twitter.downloader import MediaDownloader
-from social_archiver.llm.vertex_client import VertexVLMClient
-
-
-def get_mime(path: Path) -> str | None:
-    return {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-        ".gif": "image/gif", ".webp": "image/webp",
-        ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
-    }.get(path.suffix.lower())
 
 
 def build_parts(tweets, media_paths):
@@ -48,15 +41,11 @@ def build_parts(tweets, media_paths):
                 if qt:
                     label += f"\n  ↳ Quotes @{q.author_username}: {qt}"
 
-        parts.append({"type": "text", "text": label, "tweet_id": t.id})
+        parts.append(TextPart(label))
 
-        for idx, p in enumerate(media_paths.get(t.id, [])):
-            mime = get_mime(p)
-            if mime:
-                parts.append({
-                    "type": "media", "path": p, "mime_type": mime,
-                    "tweet_id": t.id, "media_index": idx,
-                })
+        for p in media_paths.get(t.id, []):
+            if mime := guess_mime_type(p):
+                parts.append(MediaPart(p, mime))
     return parts
 
 
@@ -76,11 +65,10 @@ async def main(n_likes: int):
     expanded.sort(key=lambda t: t.created_at or datetime(1970, 1, 1, tzinfo=timezone.utc))
     log.info(f"Expanded: {len(expanded)} tweets")
 
-    dl = MediaDownloader()
     media_paths = {}
     for t in expanded:
         if t.has_media:
-            paths = await dl.download_tweet_media(t)
+            paths = await download_urls(t.media_urls, Path("downloads/twitter/likes"), t.id)
             if paths:
                 media_paths[t.id] = paths
 
@@ -97,14 +85,15 @@ async def main(n_likes: int):
     print("INTERLEAVED PARTS")
     print("=" * 60)
     for i, p in enumerate(parts):
-        if p["type"] == "text":
-            print(f"\n  [{i}] TEXT [{p['tweet_id']}]:")
-            for line in p["text"].split("\n"):
-                print(f"       {line}")
-        else:
-            print(f"  [{i}] MEDIA [{p['tweet_id']}#{p['media_index']}]: {p['path'].name} ({p['mime_type']})")
+        match p:
+            case TextPart(text=text):
+                print(f"\n  [{i}] TEXT:")
+                for line in text.split("\n"):
+                    print(f"       {line}")
+            case MediaPart(path=path, mime_type=mime_type):
+                print(f"  [{i}] MEDIA: {path.name} ({mime_type})")
 
-    n_media = sum(1 for p in parts if p["type"] == "media")
+    n_media = sum(1 for p in parts if isinstance(p, MediaPart))
     print(f"\nTotal: {len(expanded)} tweets, {n_media} media, {len(parts)} parts")
     print("=" * 60)
 

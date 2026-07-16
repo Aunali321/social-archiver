@@ -12,15 +12,12 @@ class SharedFetcher:
     def __init__(self, ig_client: InstagramClient):
         self.ig_client = ig_client
         self._thread_id: int | None = None
-        self._sender_map: dict[str, str] = {}
 
-    def fetch_shared_media(self, dm_username: str, amount: int = 0) -> list[SimpleMedia | Media]:
+    def fetch_shared_media(self, dm_username: str, amount: int = 0) -> list[SimpleMedia]:
         logger.info(f"Fetching shared media from DM with {dm_username} (amount={amount if amount > 0 else 'all'})")
 
         if self._thread_id is None:
             self._thread_id = self._get_thread_id(dm_username)
-
-        self._sender_map.clear()
 
         if amount == 0:
             all_messages = []
@@ -40,15 +37,10 @@ class SharedFetcher:
 
         for msg in all_messages:
             media = self._extract_media(msg)
-            if media and media.pk not in seen_pks:
-                if msg.user_id:
-                    try:
-                        sender = self.ig_client.client.user_info(str(msg.user_id)).username
-                        self._sender_map[str(media.pk)] = sender
-                    except Exception as e:
-                        logger.warning(f"Failed to get sender username for user_id {msg.user_id}: {e}")
-                media_list.append(media)
-                seen_pks.add(media.pk)
+            if media is None or str(media.pk) in seen_pks:
+                continue
+            seen_pks.add(str(media.pk))
+            media_list.append(SimpleMedia.from_instagrapi(media, shared_by_username=self._sender_username(msg)))
 
         logger.info(f"Extracted {len(media_list)} shared media from {len(all_messages)} messages")
         return media_list
@@ -64,8 +56,14 @@ class SharedFetcher:
             return msg.story_share.media
         return None
 
-    def get_sender_username(self, media_pk: str) -> str | None:
-        return self._sender_map.get(str(media_pk))
+    def _sender_username(self, msg) -> str | None:
+        if not msg.user_id:
+            return None
+        try:
+            return self.ig_client.client.user_info(str(msg.user_id)).username
+        except Exception as e:
+            logger.warning(f"Failed to get sender username for user_id {msg.user_id}: {e}")
+            return None
 
     def _get_thread_id(self, username: str) -> int:
         user_id = self.ig_client.get_user_id_by_username(username)

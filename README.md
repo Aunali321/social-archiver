@@ -38,22 +38,32 @@ Edit `.env` — shared settings (Telegram bot, embedding/VLM) live at the top, p
 
 ## Usage
 
-Each platform is its own module, run independently:
+Each platform is its own module with three independent, resumable jobs. All
+state lives in SQLite, so any job can be run (or interrupted) at any time and
+picks up where it left off:
 
 ```bash
-# Instagram
-uv run python -m social_archiver.platforms.instagram --once      # fetch + exit
-uv run python -m social_archiver.platforms.instagram --history   # full history
-uv run python -m social_archiver.platforms.instagram --init      # history, then daemon
-uv run python -m social_archiver.platforms.instagram             # daemon mode
-uv run python -m social_archiver.platforms.instagram --once --category saved
+# Archive: fetch new content and download media to disk. No Telegram, no VLM.
+uv run python -m social_archiver.platforms.twitter archive
+uv run python -m social_archiver.platforms.twitter archive --history
+uv run python -m social_archiver.platforms.instagram archive --category saved
 
-# Twitter/X
-uv run python -m social_archiver.platforms.twitter --once
-uv run python -m social_archiver.platforms.twitter --history
-uv run python -m social_archiver.platforms.twitter --init
-uv run python -m social_archiver.platforms.twitter
+# Upload: send everything archived-but-not-yet-uploaded to Telegram.
+uv run python -m social_archiver.platforms.twitter upload
+uv run python -m social_archiver.platforms.twitter upload --retry-failed
+
+# Embed: VLM descriptions + search embeddings for the archived backlog.
+uv run python -m social_archiver.platforms.twitter embed
+uv run python -m social_archiver.platforms.twitter embed --retry-failed
+
+# All three in order, once / on an interval:
+uv run python -m social_archiver.platforms.twitter run
+uv run python -m social_archiver.platforms.twitter daemon
 ```
+
+Instagram exposes the same commands. Downloaded media stays on disk until both
+upload and embedding (when enabled) are done with it; if a file is ever missing
+later, it is re-downloaded from the URLs stored at archive time.
 
 ### Search the archive
 
@@ -62,21 +72,15 @@ uv run python scripts/search.py "your query" --platform instagram --category lik
 uv run python scripts/search.py "your query" --platform twitter --category likes
 ```
 
-### Instagram maintenance scripts
-
-```bash
-uv run python scripts/instagram_retry_failed_embeddings.py --dry-run
-uv run python scripts/instagram_retry_large_files.py --dry-run
-```
-
 ## How It Works
 
-Both platforms follow the same shape, built on shared infrastructure in `social_archiver/core/` and `social_archiver/llm/`:
+Both platforms follow the same shape, built on shared infrastructure in `social_archiver/core/` and `social_archiver/llm/`. Each item moves through three independent stages, each tracked by its own status column in a per-platform SQLite database (`data/<platform>.db`):
 
-1. Fetch new content since the last run (cursor/dedup against the DB).
-2. Download media, upload to the configured Telegram channel(s).
-3. Optionally: VLM-describe media, embed with a local model, store in Milvus for semantic search.
-4. Track everything in a per-platform SQLite database (`data/<platform>.db`).
+1. **archive** — fetch new content since the last run (cursor/dedup against the DB), record it, download media.
+2. **upload** — send archived items to the configured Telegram channel(s).
+3. **embed** (optional) — VLM-describe media, embed with a local model, store in Milvus for semantic search.
+
+A stage failing or being skipped never blocks the others; failed items are retried with `--retry-failed` (large files, for example, after configuring a self-hosted Bot API server).
 
 Twitter additionally expands every liked tweet recursively — self-reply chains, parent chains, quoted tweets, and liked replies — so the archive matches what you'd see on the Twitter frontend, not just the isolated liked tweet.
 
@@ -84,16 +88,14 @@ Twitter additionally expands every liked tweet recursively — self-reply chains
 
 ```
 social_archiver/
-├── core/                   # shared: database, milvus, telegram, downloader, scheduler
+├── core/                   # shared: database, jobs (upload/cleanup), milvus, telegram, downloader, scheduler, cli
 ├── llm/                    # shared: VLM clients (Vertex/Gemini/OpenRouter), local embedder, reranker
 └── platforms/
-    ├── instagram/
-    └── twitter/
+    ├── instagram/          # archiver, embedder, port (captions/folders), fetchers, __main__
+    └── twitter/            # archiver, embedder, port, expander, client, __main__
 
 scripts/
-├── search.py                              # hybrid search CLI, --platform flag
-├── instagram_retry_failed_embeddings.py
-├── instagram_retry_large_files.py
+├── search.py               # hybrid search CLI, --platform flag
 └── delete_old_posts.py
 
 data/                        # sqlite + milvus lite files (gitignored)
@@ -120,7 +122,7 @@ Telegram Bot API caps uploads at 50 MB. To go higher:
 2. Add to `.env`: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_API_URL=http://localhost:8081`, `TELEGRAM_MAX_FILE_SIZE_MB=2000`
 3. `docker compose -f docker-compose.telegram-api.yml up -d`
 4. Logout the bot from the official API: `curl "https://api.telegram.org/bot<TOKEN>/logout"`
-5. `uv run python scripts/instagram_retry_large_files.py`
+5. `uv run python -m social_archiver.platforms.instagram upload --retry-failed`
 
 ## Troubleshooting
 

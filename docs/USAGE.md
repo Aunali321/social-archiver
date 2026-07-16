@@ -20,21 +20,26 @@ nano .env
 
 ### 2. Run
 
+Three independent, resumable jobs; run them together or separately:
+
 ```bash
-# First-time setup: Fetch ALL history then start daemon
-uv run python -m social_archiver.platforms.instagram --init
+# Everything once: archive -> upload -> embed
+uv run python -m social_archiver.platforms.instagram run
 
-# One-time fetch (last 200 items per category)
-uv run python -m social_archiver.platforms.instagram --once
+# First-time setup: full history, then keep the daemon running
+uv run python -m social_archiver.platforms.instagram run --history
+uv run python -m social_archiver.platforms.instagram daemon
 
-# Fetch ALL history (entire Instagram archive)
-uv run python -m social_archiver.platforms.instagram --history
-
-# Daemon mode only (runs every 30min forever)
-uv run python -m social_archiver.platforms.instagram
+# Individual jobs
+uv run python -m social_archiver.platforms.instagram archive              # fetch + download only
+uv run python -m social_archiver.platforms.instagram archive --history    # entire Instagram archive
+uv run python -m social_archiver.platforms.instagram archive --category saved
+uv run python -m social_archiver.platforms.instagram upload               # Telegram later, when you have time
+uv run python -m social_archiver.platforms.instagram embed                # embeddings later, when you have time
 ```
 
-**Recommendation:** Use `--init` on first run to archive everything, then it automatically continues in daemon mode.
+Any job can be interrupted and re-run; it resumes from the database. `upload`
+and `embed` accept `--retry-failed` to also retry previously failed items.
 
 ## How It Works
 
@@ -43,10 +48,12 @@ uv run python -m social_archiver.platforms.instagram
 - **Saved**: Posts saved to collections (organized by collection name)
 - **Shared**: Posts shared with you via DM
 
+A category is enabled by configuring its Telegram channel ID.
+
 ### Fetch Behavior
 - **Default**: Last 200 items per category (configurable via `FETCH_BATCH_SIZE`)
 - **--history**: ALL items (paginated, may take hours)
-- **Daemon**: Checks every 30min (configurable via `CHECK_INTERVAL_MINUTES`)
+- **Daemon**: Runs all jobs every 30min (configurable via `CHECK_INTERVAL_MINUTES`)
 
 ### Smart Deduplication
 - Database tracks all processed items by `item_id`
@@ -98,7 +105,7 @@ downloads/instagram/    # Temporary (deleted after upload by default)
     └── {item_id}.mp4
 ```
 
-**Note:** Downloads are automatically deleted after successful Telegram upload by default (controlled via `CLEANUP_DOWNLOADS`). Main storage is in Telegram.
+**Note:** Downloads are deleted once every enabled consumer is done with them — after upload, and after embedding when `EMBEDDING_ENABLED=true` (controlled via `CLEANUP_DOWNLOADS`). Main storage is in Telegram. If a file is needed again later, it is re-downloaded from the URLs stored at archive time.
 
 ## Common Scenarios
 
@@ -106,25 +113,34 @@ downloads/instagram/    # Temporary (deleted after upload by default)
 ```bash
 # Fetches last 200 items by default (covers ~3-5 days)
 # To fetch more items, set FETCH_BATCH_SIZE in .env
-uv run python -m social_archiver.platforms.instagram --once
+uv run python -m social_archiver.platforms.instagram run
 ```
 
 ### After Long Downtime (>1 week)
 ```bash
 # Fetch everything since last run
-uv run python -m social_archiver.platforms.instagram --history --once
+uv run python -m social_archiver.platforms.instagram run --history
+```
+
+### No Time For Uploads/Embeddings Right Now
+```bash
+# Secure the content first; the rest can happen any time later
+uv run python -m social_archiver.platforms.instagram archive
+# ...later:
+uv run python -m social_archiver.platforms.instagram upload
+uv run python -m social_archiver.platforms.instagram embed
 ```
 
 ### Production Deployment
 ```bash
 # Run as daemon with auto-restart
-uv run python -m social_archiver.platforms.instagram
+uv run python -m social_archiver.platforms.instagram daemon
 ```
 
 ### Testing
 ```bash
 # Check connection & credentials
-uv run python -m social_archiver.platforms.instagram --once
+uv run python -m social_archiver.platforms.instagram archive
 # Watch logs/instagram.log
 ```
 
@@ -143,7 +159,7 @@ Type=simple
 User=your_user
 WorkingDirectory=/path/to/social-archiver
 Environment="PATH=/path/to/.local/bin:/usr/bin"
-ExecStart=/home/your_user/.local/bin/uv run python -m social_archiver.platforms.instagram
+ExecStart=/home/your_user/.local/bin/uv run python -m social_archiver.platforms.instagram daemon
 Restart=always
 RestartSec=10
 
@@ -199,7 +215,7 @@ screen -S archiver
 
 # Run archiver
 cd /path/to/social-archiver
-uv run python -m social_archiver.platforms.instagram
+uv run python -m social_archiver.platforms.instagram daemon
 
 # Detach: Ctrl+A, D
 # Reattach: screen -r archiver
@@ -214,7 +230,7 @@ crontab -e
 
 Add line (runs every 30min):
 ```cron
-*/30 * * * * cd /path/to/social-archiver && /home/user/.local/bin/uv run python -m social_archiver.platforms.instagram --once >> /path/to/logs/cron.log 2>&1
+*/30 * * * * cd /path/to/social-archiver && /home/user/.local/bin/uv run python -m social_archiver.platforms.instagram run >> /path/to/logs/cron.log 2>&1
 ```
 
 ## Monitoring
@@ -225,7 +241,7 @@ Add line (runs every 30min):
 tail -f logs/instagram.log
 
 # Check database stats
-sqlite3 data/instagram.db "SELECT category, COUNT(*) as total, SUM(CASE WHEN status='uploaded' THEN 1 ELSE 0 END) as uploaded FROM items WHERE platform='instagram' GROUP BY category"
+uv run python scripts/search.py --platform instagram stats
 
 # Check disk usage
 du -sh downloads/instagram/
@@ -242,14 +258,11 @@ du -sh downloads/instagram/
 ```bash
 # Delete session and retry
 rm data/instagram_session.json
-uv run python -m social_archiver.platforms.instagram --once
+uv run python -m social_archiver.platforms.instagram archive
 ```
 
 ### Missing .env Variables
-```bash
-# Validate config
-uv run python -c "from social_archiver.platforms.instagram import config; config.validate_config()"
-```
+Every command validates the variables it needs on startup and names the missing ones.
 
 ### Telegram Upload Timeout
 - Check internet connection
@@ -266,7 +279,7 @@ uv run python -c "from social_archiver.platforms.instagram import config; config
 ### View Processed Items
 ```bash
 sqlite3 data/instagram.db
-SELECT item_id, category, author_username, metadata
+SELECT item_id, category, author_username, archive_status, upload_status, embed_status
 FROM items WHERE platform='instagram'
 ORDER BY fetched_at DESC
 LIMIT 10;
@@ -275,7 +288,7 @@ LIMIT 10;
 ### Reset Category
 ```bash
 sqlite3 data/instagram.db "DELETE FROM items WHERE platform='instagram' AND category='saved'"
-uv run python -m social_archiver.platforms.instagram --once
+uv run python -m social_archiver.platforms.instagram run
 ```
 
 ### Backup Database
