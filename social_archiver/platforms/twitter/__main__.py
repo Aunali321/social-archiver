@@ -30,8 +30,9 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
     try:
         if not await tw_client.verify_credentials():
             raise RuntimeError("Twitter credential verification failed")
+        tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
         async with Database(config.DATABASE_PATH) as db:
-            await ArchiveJob(tw_client, db, PORT, TelegramClient()).run(fetch_all, category, retry_failed)
+            await ArchiveJob(tw_client, db, PORT, tg).run(fetch_all, category, retry_failed)
     finally:
         await tw_client.close()
 

@@ -38,7 +38,7 @@ class ArchiveJob:
     Uploading and embedding are separate jobs. Rows are committed before any
     download starts, so an interrupted run resumes exactly where it stopped."""
 
-    def __init__(self, tw_client: TwitterClient, db: Database, port: TwitterPort, tg: TelegramClient):
+    def __init__(self, tw_client: TwitterClient, db: Database, port: TwitterPort, tg: TelegramClient | None = None):
         self.tw_client = tw_client
         self.db = db
         self.port = port
@@ -65,9 +65,10 @@ class ArchiveJob:
                     delay = min(delay * 1.5, MAX_RETRY_DELAY)
                     continue
                 logger.error(f"Archiving {category.name} failed: {e}")
-                await self.tg.send_error_notification(
-                    type(e).__name__, f"archive:{category.name}", traceback.format_exc()
-                )
+                if self.tg:
+                    await self.tg.send_error_notification(
+                        type(e).__name__, f"archive:{category.name}", traceback.format_exc()
+                    )
                 raise
 
     async def _record_new_tweets(self, category: Category, fetch_all: bool):
