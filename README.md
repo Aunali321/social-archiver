@@ -1,136 +1,187 @@
 # Social Archiver
 
-Automated archiver that pulls content you've liked/saved/bookmarked across social platforms and uploads it to Telegram, with optional semantic search over the archive.
+Archives what you've liked, saved and bookmarked across social platforms to your own disk,
+optionally mirrors it to Telegram, and optionally makes it semantically searchable.
 
-Currently supports **Instagram** (likes, saved collections, DM shares) and **Twitter/X** (likes, with full thread/quote/retweet expansion). Built to add more platforms without touching what already works.
+Supports **Instagram** (likes, saved collections, DM shares), **Reddit** (saved, upvoted,
+downvoted, your own posts) and **Twitter/X** (likes and bookmarks, expanded to full threads).
 
-## Features
+## How it works
 
-- Instagram: liked posts, saved collections, DM-shared content
-- Twitter/X: liked tweets, recursively expanded to full threads, parent chains, quoted tweets, and liked replies
-- Uploads to per-category Telegram channels, with error notifications
-- SQLite tracking (shared schema across platforms) to avoid re-processing
-- Exponential backoff on rate limits
-- **Optional**: VLM-generated media descriptions + local embeddings for hybrid semantic search (Milvus Lite)
+Every platform runs the same independent, resumable jobs. Each tracks its own status column in
+a per-platform SQLite database, so any job can be run, interrupted, or skipped without
+affecting the others:
+
+| Job | What it does | Needs |
+|---|---|---|
+| `archive` | Fetch new content, download media to disk | platform credentials |
+| `upload` | Send archived items to Telegram | bot token + channel ids |
+| `embed` | Index for semantic search | an embedding server |
+| `run` / `daemon` | All of the above, once / on an interval | |
+
+Archiving never depends on Telegram or embeddings — run it alone and the rest can catch up
+later. Failed items are retried with `--retry-failed`.
+
+Long history walks resume: a stopped run continues from its stored cursor rather than paging
+from the top again.
 
 ## Setup
 
-### Prerequisites
+### 1. Install
 
-- Python 3.13+, [uv](https://docs.astral.sh/uv/)
-- A Telegram bot token ([create one](https://core.telegram.org/bots#6-botfather))
-- Instagram account credentials, and/or Twitter `auth_token`/`ct0` cookies
-
-### Installation
+Requires Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd social-archiver
 uv sync
-```
-
-### Configuration
-
-```bash
 cp .env.example .env
 ```
 
-Edit `.env` — shared settings (Telegram bot, embedding/VLM) live at the top, platform-specific credentials and channel IDs are grouped below.
+### 2. Credentials
+
+Configure only the platforms you want. `.env.example` documents every setting.
+
+**Instagram** — username and password. The session persists to `data/instagram_session.json`,
+so login happens once. To archive DM shares, set `INSTAGRAM_DM_USERNAME` to the account whose
+thread should be walked; leave it empty and that category is skipped.
+
+```env
+INSTAGRAM_USERNAME=
+INSTAGRAM_PASSWORD=
+INSTAGRAM_DM_USERNAME=
+```
+
+**Reddit** — create an *installed app* at https://www.reddit.com/prefs/apps with redirect uri
+`http://localhost:8080`, which issues a client id and no secret. Then run the one-time OAuth
+helper; it prints a refresh token, so no password is stored and 2FA stays in the browser:
+
+```bash
+REDDIT_CLIENT_ID=your_id uv run python scripts/reddit_auth.py
+```
+
+```env
+REDDIT_CLIENT_ID=
+REDDIT_REFRESH_TOKEN=
+```
+
+**Twitter/X** — cookie auth. On `x.com`, DevTools → Application → Cookies, copy `auth_token`
+and `ct0`. They expire periodically; a 401 means fetch fresh ones.
+
+```env
+TWITTER_AUTH_TOKEN=
+TWITTER_CT0=
+```
+
+### 3. Telegram (optional)
+
+Only needed for `upload`. Create a bot with [@BotFather](https://core.telegram.org/bots#6-botfather),
+then set the per-category channel ids (`TELEGRAM_CHAT_LIKES`, `REDDIT_CHAT_SAVED`, ...). Items
+archived without a channel simply wait; configure one later and `upload` picks them up.
+
+### 4. Embeddings and search (optional)
+
+Set `EMBEDDING_ENABLED=true` and point `EMBED_URL` at any OpenAI-compatible embedding server —
+vLLM, llama.cpp or TEI. The archiver carries no ML runtime of its own, so the model runs
+wherever it has the hardware for it:
+
+```bash
+vllm serve jinaai/jina-embeddings-v5-omni-small --runner pooling \
+  --trust-remote-code --hf-overrides '{"task": "retrieval"}'
+```
+
+```env
+EMBEDDING_ENABLED=true
+EMBED_URL=http://localhost:8000/v1/embeddings
+EMBED_MODEL=jinaai/jina-embeddings-v5-omni-small
+```
+
+`embed` captions media with a VLM (`VLM_PROVIDER`: `vertex`, `gemini` or `openrouter`), joins
+that with the post's own text, and stores the vector in Milvus Lite beside the archive.
+
+Reranking is optional and needs a second server, since a reranker is a different model from an
+embedder. Leave `RERANK_URL` empty and search returns plain vector order.
 
 ## Usage
 
-Each platform is its own module with three independent, resumable jobs. All
-state lives in SQLite, so any job can be run (or interrupted) at any time and
-picks up where it left off:
-
 ```bash
-# Archive: fetch new content and download media to disk. No Telegram, no VLM.
-uv run python -m social_archiver.platforms.twitter archive
-uv run python -m social_archiver.platforms.twitter archive --history
+# One platform, one job
+uv run python -m social_archiver.platforms.reddit archive
 uv run python -m social_archiver.platforms.instagram archive --category saved
-
-# Upload: send everything archived-but-not-yet-uploaded to Telegram.
-uv run python -m social_archiver.platforms.twitter upload
 uv run python -m social_archiver.platforms.twitter upload --retry-failed
 
-# Embed: VLM descriptions + search embeddings for the archived backlog.
-uv run python -m social_archiver.platforms.twitter embed
-uv run python -m social_archiver.platforms.twitter embed --retry-failed
+# Full history rather than only what is new
+uv run python -m social_archiver.platforms.reddit archive --history
 
-# All three in order, once / on an interval:
+# Everything in order, once / forever
 uv run python -m social_archiver.platforms.twitter run
 uv run python -m social_archiver.platforms.twitter daemon
 ```
 
-Instagram exposes the same commands. Downloaded media stays on disk until both
-upload and embedding (when enabled) are done with it; if a file is ever missing
-later, it is re-downloaded from the URLs stored at archive time.
-
-### Search the archive
+Search the archive:
 
 ```bash
-uv run python scripts/search.py "your query" --platform instagram --category likes
-uv run python scripts/search.py "your query" --platform twitter --category likes
+uv run python scripts/search.py "your query" --platform reddit --category saved
 ```
 
-## How It Works
+### Account exports
 
-Both platforms follow the same shape, built on shared infrastructure in `social_archiver/core/` and `social_archiver/llm/`. Each item moves through three independent stages, each tracked by its own status column in a per-platform SQLite database (`data/<platform>.db`):
+Reddit and Twitter cap how far their APIs page back. Request your account export from the
+platform, point the archiver at the zip, and it backfills past that ceiling in resumable
+chunks:
 
-1. **archive** — fetch new content since the last run (cursor/dedup against the DB), record it, download media.
-2. **upload** — send archived items to the configured Telegram channel(s).
-3. **embed** (optional) — VLM-describe media, embed with a local model, store in Milvus for semantic search.
+```env
+REDDIT_EXPORT_PATH=./data/reddit_export.zip
+TWITTER_EXPORT_PATH=./data/twitter_export.zip
+```
 
-A stage failing or being skipped never blocks the others; failed items are retried with `--retry-failed` (large files, for example, after configuring a self-hosted Bot API server).
+## Docker
 
-Twitter additionally expands every liked tweet recursively — self-reply chains, parent chains, quoted tweets, and liked replies — so the archive matches what you'd see on the Twitter frontend, not just the isolated liked tweet.
+Images publish to `ghcr.io/aunali321/social-archiver`. `ARCHIVE_ROOT` is the host directory
+holding `data/`, `downloads/` and `logs/`; leave it unset to use the compose file's own
+directory.
 
-## Project Structure
+```bash
+docker compose up -d                                                # all three daemons
+docker compose --profile history run --rm reddit-archiver-history   # one-time full backfill
+```
+
+`downloads/` is the archive itself and is mounted as a volume — with `CLEANUP_DOWNLOADS=false`
+nothing is ever deleted, so it must not live in the container's writable layer.
+
+## Layout
 
 ```
 social_archiver/
-├── core/                   # shared: database, jobs (upload/cleanup), milvus, telegram, downloader, scheduler, cli
-├── llm/                    # shared: VLM clients (Vertex/Gemini/OpenRouter), local embedder, reranker
-└── platforms/
-    ├── instagram/          # archiver, embedder, port (captions/folders), fetchers, __main__
-    └── twitter/            # archiver, embedder, port, expander, client, __main__
+├── core/         database, jobs, milvus, telegram, downloader, scheduler, cli
+├── llm/          VLM clients (vertex/gemini/openrouter), embed + rerank HTTP clients
+└── platforms/    instagram/ reddit/ twitter/ — archiver, embedder, port, fetchers, __main__
 
-scripts/
-├── search.py               # hybrid search CLI, --platform flag
-└── delete_old_posts.py
-
-data/                        # sqlite + milvus lite files (gitignored)
-downloads/{instagram,twitter}/
-logs/
+data/             sqlite + milvus lite + session + exports   (gitignored)
+downloads/        the archived media                          (gitignored)
+logs/             per-platform, rotated daily                 (gitignored)
 ```
 
-## Logging
+## Large files
 
-`logs/instagram.log` / `logs/twitter.log` (DEBUG, rotates daily, 30-day retention), plus INFO-level console output.
-
-## Notes
-
-- Instagram IGTV posts are skipped by default.
-- Instagram session persists to `data/instagram_session.json`.
-- Automating Instagram/Twitter violates their ToS; use at your own risk.
-- Files exceeding `TELEGRAM_MAX_FILE_SIZE_MB` are skipped and logged — see below for self-hosted Bot API to raise the limit.
-
-## Large Files (>50 MB)
-
-Telegram Bot API caps uploads at 50 MB. To go higher:
+Telegram's Bot API caps uploads at 50 MB. To go higher, run a self-hosted Bot API server:
 
 1. Get API credentials from https://my.telegram.org
-2. Add to `.env`: `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_API_URL=http://localhost:8081`, `TELEGRAM_MAX_FILE_SIZE_MB=2000`
+2. Set `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_API_URL=http://localhost:8081`,
+   `TELEGRAM_MAX_FILE_SIZE_MB=2000`
 3. `docker compose -f docker-compose.telegram-api.yml up -d`
-4. Logout the bot from the official API: `curl "https://api.telegram.org/bot<TOKEN>/logout"`
+4. Log the bot out of the official API: `curl "https://api.telegram.org/bot<TOKEN>/logout"`
 5. `uv run python -m social_archiver.platforms.instagram upload --retry-failed`
 
 ## Troubleshooting
 
-- **Instagram challenge required**: manual verification needed; check error notifications.
-- **Rate limits**: increase `CHECK_INTERVAL_MINUTES`.
-- **Instagram session expired**: delete `data/instagram_session.json` to force a fresh login.
-- **Twitter 401/credential errors**: `auth_token`/`ct0` cookies expired — grab fresh ones from the browser.
+- **Instagram `FeedbackRequired`** — a soft block on that endpoint, caused by repeated
+  requests. Retrying makes it worse; leave that category alone and it clears on its own.
+- **Instagram challenge required** — manual verification; check the error notification.
+- **Instagram session expired** — delete `data/instagram_session.json` to force a fresh login.
+- **Twitter 401** — `auth_token`/`ct0` expired, fetch fresh cookies.
+- **Rate limits generally** — raise `CHECK_INTERVAL_MINUTES`.
 
-## Embeddings (Optional)
+## Notes
 
-See [docs/EMBEDDINGS.md](docs/EMBEDDINGS.md). Set `EMBEDDING_ENABLED=true` and configure `VLM_PROVIDER` in `.env`.
+- Instagram IGTV posts are skipped.
+- Reddit link posts to YouTube keep their url, but the video itself is not downloaded.
+- Automating these platforms is against their terms of service; use at your own risk.
