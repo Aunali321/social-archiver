@@ -170,8 +170,22 @@ function jobRow(p, job) {
     <button ${p.running ? 'disabled' : ''} onclick="run('${p.platform}','${job}')">run</button></div>`;
 }
 
+// The poll re-renders the grid, which would otherwise discard whatever the user has
+// selected mid-interaction.
+const snapshot = () => Object.fromEntries([...document.querySelectorAll('#grid input,#grid select')]
+  .map(el => [el.id, el.type === 'checkbox' ? el.checked : el.value]));
+
+function restore(state) {
+  for (const [id, value] of Object.entries(state)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = value; else el.value = value;
+  }
+}
+
 async function load() {
   const rows = await (await fetch('/api/status')).json();
+  const state = snapshot();
   document.getElementById('grid').innerHTML = rows.map(p => `
     <div class="card">
       <div class="name">${p.platform}${p.running ? `<span class="badge">running ${p.running}</span>` : ''}</div>
@@ -183,6 +197,7 @@ async function load() {
         </table>`}
       ${Object.keys(FLAGS).map(j => jobRow(p, j)).join('')}
     </div>`).join('');
+  restore(state);
 }
 
 async function run(platform, job) {
