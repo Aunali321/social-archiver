@@ -100,6 +100,18 @@ that with the post's own text, and stores the vector in Milvus Lite beside the a
 Reranking is optional and needs a second server, since a reranker is a different model from an
 embedder. Leave `RERANK_URL` empty and search returns plain vector order.
 
+## Web UI
+
+A status page and job runner at `http://<host>:8787`, started with the stack. It shows
+archived/pending/failed per platform and per stage, whether a history walk can resume, and
+runs any job with any of its flags — the same surface as the CLI.
+
+It has no authentication and can start jobs, so keep it on the LAN.
+
+```bash
+uv run python -m social_archiver.web    # WEB_HOST / WEB_PORT to change where it binds
+```
+
 ## Usage
 
 ```bash

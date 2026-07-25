@@ -14,6 +14,16 @@ x-archiver: &archiver
     - ${ARCHIVE_ROOT:-.}/logs:/logs
 
 services:
+  # Status for every platform, and any job with any of its flags. No authentication —
+  # it can start jobs, so keep it on the LAN.
+  web:
+    <<: *archiver
+    container_name: social-archiver-web
+    restart: unless-stopped
+    ports:
+      - "8787:8080"
+    command: ["python", "-m", "social_archiver.web"]
+
   instagram-archiver:
     <<: *archiver
     container_name: instagram-archiver

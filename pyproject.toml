@@ -16,6 +16,8 @@ dependencies = [
     "asyncpraw>=7.8.0",
     "yt-dlp>=2025.1.15",
     "google-genai>=1.0.0",
+    "fastapi>=0.140.0",
+    "uvicorn>=0.51.0",
 ]
 
 
