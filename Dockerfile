@@ -31,4 +31,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 VOLUME ["/data", "/downloads", "/logs"]
 
-CMD ["python", "-m", "social_archiver.platforms.instagram", "daemon"]
+CMD ["python", "-m", "social_archiver.web"]

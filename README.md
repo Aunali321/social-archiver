@@ -100,11 +100,17 @@ that with the post's own text, and stores the vector in Milvus Lite beside the a
 Reranking is optional and needs a second server, since a reranker is a different model from an
 embedder. Leave `RERANK_URL` empty and search returns plain vector order.
 
-## Web UI
+## The service
 
-A status page and job runner at `http://<host>:8787`, started with the stack. It shows
-archived/pending/failed per platform and per stage, whether a history walk can resume, and
-runs any job with any of its flags — the same surface as the CLI.
+`python -m social_archiver.web` is the whole thing: a web UI on port 8787, a scheduler, and
+one worker per platform.
+
+The scheduler and the UI both *enqueue* jobs; only the worker runs them. So a timer firing
+during a long walk queues behind it instead of racing it, and the same platform can never
+archive twice at once. Different platforms run in parallel — separate APIs, separate limits.
+
+The queue lives in `data/jobs.db`, so a restart loses nothing and a run that died is marked
+interrupted rather than vanishing. The UI shows the queue, recent runs and their errors.
 
 It has no authentication and can start jobs, so keep it on the LAN.
 

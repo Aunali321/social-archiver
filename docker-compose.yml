@@ -1,65 +1,22 @@
-# ARCHIVE_ROOT is the host directory holding the archive. Leave it unset to use the repo
-# directory; on a NAS point it at the dataset, e.g.
+# ARCHIVE_ROOT is the host directory holding the archive. Leave it unset to use the compose
+# file's own directory; on a NAS point it at the dataset, e.g.
 #   ARCHIVE_ROOT=/mnt/tank/social-archiver
 # downloads/ is the archive itself and must stay a volume: with CLEANUP_DOWNLOADS=false
 # nothing is ever deleted, so an unmounted downloads/ would sit in the container's writable
 # layer and be lost on the next rebuild.
-x-archiver: &archiver
-  image: ghcr.io/aunali321/social-archiver:latest
-  # build: .  # Uncomment to build locally instead
-  env_file: .env
-  volumes:
-    - ${ARCHIVE_ROOT:-.}/data:/data
-    - ${ARCHIVE_ROOT:-.}/downloads:/downloads
-    - ${ARCHIVE_ROOT:-.}/logs:/logs
-
+#
+# One service, not one per platform: the scheduler and the web UI both enqueue, and a single
+# worker per platform drains that queue, so nothing can run the same platform twice at once.
 services:
-  # Status for every platform, and any job with any of its flags. No authentication —
-  # it can start jobs, so keep it on the LAN.
-  web:
-    <<: *archiver
-    container_name: social-archiver-web
+  social-archiver:
+    image: ghcr.io/aunali321/social-archiver:latest
+    # build: .  # Uncomment to build locally instead
+    container_name: social-archiver
     restart: unless-stopped
+    env_file: .env
     ports:
       - "8787:8080"
-    command: ["python", "-m", "social_archiver.web"]
-
-  instagram-archiver:
-    <<: *archiver
-    container_name: instagram-archiver
-    restart: unless-stopped
-    command: ["python", "-m", "social_archiver.platforms.instagram", "daemon"]
-
-  twitter-archiver:
-    <<: *archiver
-    container_name: twitter-archiver
-    restart: unless-stopped
-    command: ["python", "-m", "social_archiver.platforms.twitter", "daemon"]
-
-  reddit-archiver:
-    <<: *archiver
-    container_name: reddit-archiver
-    restart: unless-stopped
-    command: ["python", "-m", "social_archiver.platforms.reddit", "daemon"]
-
-  # One-time full-history passes. Run manually, one at a time:
-  #   docker compose --profile history run --rm reddit-archiver-history
-  # Each ingests its account export from /data where one is configured, and resumes from the
-  # database if interrupted, so re-running costs only the pages it had not reached.
-  instagram-archiver-history:
-    <<: *archiver
-    container_name: instagram-archiver-history
-    profiles: ["history"]
-    command: ["python", "-m", "social_archiver.platforms.instagram", "run", "--history"]
-
-  twitter-archiver-history:
-    <<: *archiver
-    container_name: twitter-archiver-history
-    profiles: ["history"]
-    command: ["python", "-m", "social_archiver.platforms.twitter", "run", "--history"]
-
-  reddit-archiver-history:
-    <<: *archiver
-    container_name: reddit-archiver-history
-    profiles: ["history"]
-    command: ["python", "-m", "social_archiver.platforms.reddit", "run", "--history"]
+    volumes:
+      - ${ARCHIVE_ROOT:-.}/data:/data
+      - ${ARCHIVE_ROOT:-.}/downloads:/downloads
+      - ${ARCHIVE_ROOT:-.}/logs:/logs
