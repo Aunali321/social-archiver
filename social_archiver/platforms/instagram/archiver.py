@@ -75,6 +75,11 @@ class ArchiveJob:
 
         recorded = known = downloaded = 0
         for page in self._fetch(category, fetch_all, start_cursor):
+            # Before the dedupe below, so a post moved between collections is still recorded
+            # against the one it is in now. Only `saved` carries a collection.
+            if memberships := [(m.pk, m.collection_name) for m in page.media if m.collection_name]:
+                await self.db.add_collections(memberships)
+
             pending = []
             for media in page.media:
                 if media.pk in existing:

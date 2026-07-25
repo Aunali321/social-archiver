@@ -253,6 +253,15 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_item_categories_category ON item_categories(category);
 
+            -- A saved post can sit in several Instagram collections at once, and can be moved
+            -- between them later. items.collection_name records only where it was first seen.
+            CREATE TABLE IF NOT EXISTS item_collections (
+                item_id TEXT NOT NULL,
+                collection TEXT NOT NULL,
+                PRIMARY KEY (item_id, collection)
+            );
+            CREATE INDEX IF NOT EXISTS idx_item_collections_collection ON item_collections(collection);
+
             -- Where a history walk had got to, so an interrupted one resumes instead of
             -- paging from the top again. Only a full backfill writes here.
             CREATE TABLE IF NOT EXISTS fetch_cursors (
@@ -312,6 +321,21 @@ class Database:
             "INSERT OR IGNORE INTO item_categories (item_id, category) VALUES (?, ?)", list(pairs)
         )
         await self._connection.commit()
+
+    async def add_collections(self, pairs: Iterable[tuple[str, str]]):
+        """Record collection membership for every item seen, archived or not. The archive loop
+        skips items it already has, so membership recorded only on insert would freeze at
+        whichever collection the item was first found in."""
+        await self._connection.executemany(
+            "INSERT OR IGNORE INTO item_collections (item_id, collection) VALUES (?, ?)", list(pairs)
+        )
+        await self._connection.commit()
+
+    async def collections_for(self, item_id: str) -> set[str]:
+        cursor = await self._connection.execute(
+            "SELECT collection FROM item_collections WHERE item_id = ?", (item_id,)
+        )
+        return {row["collection"] for row in await cursor.fetchall()}
 
     async def categories_for(self, item_id: str) -> set[str]:
         cursor = await self._connection.execute("SELECT category FROM item_categories WHERE item_id = ?", (item_id,))
