@@ -46,7 +46,7 @@ class ArchiveJob:
 
     async def run(self, fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
         for cat in CATEGORIES:
-            if self.port.chats[cat.name] and category in (None, cat.name):
+            if category in (None, cat.name):
                 await self._archive_category(cat, fetch_all)
         await download_pending(self.db, self.port, retry_failed)
 
