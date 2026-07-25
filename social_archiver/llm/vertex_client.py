@@ -30,10 +30,18 @@ type ThreadPart = TextPart | MediaPart
 class MediaCaption(BaseModel):
     tweet_id: str = Field(description="The tweet ID this media belongs to.")
     media_index: int = Field(description="0-based index of this media within the tweet (0 if only one).")
-    visual_description: str = Field(description="What is visually shown: scenes, people, setting, objects, layout, colors, actions, camera angles.")
-    visible_text: str = Field(description="ALL text visible in the media, transcribed word-for-word exactly as it appears. Labels, headlines, chyrons, tickers, signs, watermarks, credits, dates, UI elements. Empty string if no text visible.")
-    speech_transcript: str = Field(description="Complete verbatim transcript of ALL spoken words. Attribute to speakers when identifiable. Mark unclear parts as [inaudible]. Empty string if no speech or if image.")
-    audio_description: str = Field(description="Background music, sound effects, ambient sounds. Empty string if silent or image.")
+    visual_description: str = Field(
+        description="What is visually shown: scenes, people, setting, objects, layout, colors, actions, camera angles."
+    )
+    visible_text: str = Field(
+        description="ALL text visible in the media, transcribed word-for-word exactly as it appears. Labels, headlines, chyrons, tickers, signs, watermarks, credits, dates, UI elements. Empty string if no text visible."
+    )
+    speech_transcript: str = Field(
+        description="Complete verbatim transcript of ALL spoken words. Attribute to speakers when identifiable. Mark unclear parts as [inaudible]. Empty string if no speech or if image."
+    )
+    audio_description: str = Field(
+        description="Background music, sound effects, ambient sounds. Empty string if silent or image."
+    )
 
 
 class ThreadCaptions(BaseModel):
@@ -124,9 +132,7 @@ class VertexVLMClient:
         )
         logger.info(f"Vertex AI client initialized: model={model}, project={project or '(auto)'}")
 
-    async def describe_media(
-        self, media_path: Path, media_type: str, thread_context: str | None = None
-    ) -> str | None:
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> str | None:
         """Describe a single image/video with Gemini."""
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
@@ -246,14 +252,22 @@ class VertexVLMClient:
             return False
 
         wait = retry_wait(attempt)
-        logger.warning(f"{'Rate limited' if is_rate_limit else f'Error: {error}'}, retrying in {wait}s (attempt {attempt})")
+        logger.warning(
+            f"{'Rate limited' if is_rate_limit else f'Error: {error}'}, retrying in {wait}s (attempt {attempt})"
+        )
         await asyncio.sleep(wait)
         return True
 
     def _get_image_mime_type(self, path: Path) -> str:
-        return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                ".gif": "image/gif", ".webp": "image/webp"}.get(path.suffix.lower(), "image/jpeg")
+        return {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower(), "image/jpeg")
 
     def _get_video_mime_type(self, path: Path) -> str:
-        return {".mp4": "video/mp4", ".mov": "video/quicktime",
-                ".avi": "video/x-msvideo", ".webm": "video/webm"}.get(path.suffix.lower(), "video/mp4")
+        return {".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo", ".webm": "video/webm"}.get(
+            path.suffix.lower(), "video/mp4"
+        )

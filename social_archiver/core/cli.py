@@ -10,6 +10,9 @@ def build_parser(description: str, categories: Sequence[str]) -> argparse.Argume
     archive = commands.add_parser("archive", help="Fetch new content and download media to disk")
     archive.add_argument("--history", action="store_true", help="Fetch the full history, not just new items")
     archive.add_argument("--category", choices=categories, help="Archive a single category")
+    archive.add_argument(
+        "--retry-failed", action="store_true", help="Also retry items whose media download previously failed"
+    )
 
     upload = commands.add_parser("upload", help="Send archived items to their Telegram channels")
     upload.add_argument("--retry-failed", action="store_true", help="Also retry items whose upload previously failed")

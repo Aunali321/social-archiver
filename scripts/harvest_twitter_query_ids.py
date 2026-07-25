@@ -6,6 +6,7 @@ FALLBACK_QUERY_IDS in social_archiver/platforms/twitter/client.py.
 
     uv run python scripts/harvest_twitter_query_ids.py
 """
+
 import asyncio
 import json
 import re
@@ -18,10 +19,17 @@ UA = (
 )
 
 TARGETS = {
-    "TweetResultByRestId", "TweetResultsByRestIds", "TweetDetail",
-    "Likes", "Bookmarks", "SearchTimeline", "UserTweets",
-    "UserTweetsAndReplies", "BookmarkFolderTimeline",
-    "UserByScreenName", "UserByRestId",
+    "TweetResultByRestId",
+    "TweetResultsByRestIds",
+    "TweetDetail",
+    "Likes",
+    "Bookmarks",
+    "SearchTimeline",
+    "UserTweets",
+    "UserTweetsAndReplies",
+    "BookmarkFolderTimeline",
+    "UserByScreenName",
+    "UserByRestId",
 }
 
 BUNDLE_RE = re.compile(r"https://abs\.twimg\.com/responsive-web/client-web(?:-legacy)?/[A-Za-z0-9.-]+\.js")

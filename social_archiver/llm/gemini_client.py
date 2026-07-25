@@ -43,9 +43,7 @@ class GeminiClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(
-        self, media_path: Path, media_type: str, thread_context: str | None = None
-    ) -> str | None:
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> str | None:
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
             return None
@@ -79,13 +77,25 @@ class GeminiClient:
         return await self._call_gemini(payload)
 
     def _get_image_mime_type(self, path: Path) -> str:
-        return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                ".gif": "image/gif", ".webp": "image/webp"}.get(path.suffix.lower(), "image/jpeg")
+        return {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower(), "image/jpeg")
 
     def _get_video_mime_type(self, path: Path) -> str:
-        return {".mp4": "video/mp4", ".mov": "video/mov", ".avi": "video/avi", ".webm": "video/webm",
-                ".mpg": "video/mpg", ".mpeg": "video/mpeg", ".wmv": "video/wmv",
-                ".3gpp": "video/3gpp"}.get(path.suffix.lower(), "video/mp4")
+        return {
+            ".mp4": "video/mp4",
+            ".mov": "video/mov",
+            ".avi": "video/avi",
+            ".webm": "video/webm",
+            ".mpg": "video/mpg",
+            ".mpeg": "video/mpeg",
+            ".wmv": "video/wmv",
+            ".3gpp": "video/3gpp",
+        }.get(path.suffix.lower(), "video/mp4")
 
     async def _call_gemini(self, payload: dict) -> str | None:
         url = f"{GEMINI_API_BASE_URL}/models/{self.model}:generateContent"
@@ -116,7 +126,9 @@ class GeminiClient:
 
                     candidate = candidates[0]
                     if "content" not in candidate:
-                        logger.warning(f"No content in candidate, finishReason: {candidate.get('finishReason', 'UNKNOWN')}")
+                        logger.warning(
+                            f"No content in candidate, finishReason: {candidate.get('finishReason', 'UNKNOWN')}"
+                        )
                         return None
 
                     parts = candidate["content"].get("parts", [])

@@ -7,7 +7,6 @@ from pathlib import Path
 from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import ensure_media
 from social_archiver.core.media_kind import guess_mime_type
-from social_archiver.core.milvus_manager import MilvusManager
 from social_archiver.llm import local_embedder
 from social_archiver.llm.vertex_client import (
     MediaCaption,
@@ -17,20 +16,20 @@ from social_archiver.llm.vertex_client import (
     ThreadPart,
     VertexVLMClient,
 )
-from social_archiver.platforms.twitter.port import PLATFORM, SEED_ORIGINS, TwitterPort
+from social_archiver.platforms.reddit.port import PLATFORM, SEED_ORIGINS, RedditPort
 
 logger = logging.getLogger(__name__)
 
-# One VLM call covers many tweets at once; these caps keep a large resumed
-# backlog within the model's context window.
+# One VLM call covers many items at once; these caps keep a large resumed backlog
+# within the model's context window.
 MAX_MEDIA_PER_CALL = 20
-MAX_TWEETS_PER_CALL = 80
+MAX_ITEMS_PER_CALL = 80
 
 
 @dataclass(frozen=True, slots=True)
 class ThreadGroup:
-    """One thread, in chronological order. Only `target_ids` still need
-    embeddings; the other members ride along as context for the VLM."""
+    """One thread, in chronological order. Only `target_ids` still need embeddings;
+    the other members ride along as context for the VLM."""
 
     members: tuple[Item, ...]
     target_ids: frozenset[str]
@@ -41,13 +40,12 @@ class ThreadGroup:
 
 
 class EmbedJob:
-    """Generates VLM descriptions and search embeddings for archived tweets.
+    """Generates VLM descriptions and search embeddings for archived items. Threads
+    are reconstructed from the database, so an item embedded long after archival
+    still gets its full conversation as context, and an interrupted run resumes
+    with whatever is still pending."""
 
-    Threads are reconstructed from the database, so a tweet embedded weeks
-    after archival still gets its full conversation as context, and an
-    interrupted run resumes with whatever is still pending."""
-
-    def __init__(self, db: Database, vlm: VertexVLMClient, milvus: MilvusManager, port: TwitterPort):
+    def __init__(self, db: Database, vlm: VertexVLMClient, milvus, port: RedditPort):
         self.db = db
         self.vlm = vlm
         self.milvus = milvus
@@ -60,7 +58,7 @@ class EmbedJob:
                 continue
 
             groups = await self._load_groups(pending)
-            logger.info(f"Embedding {len(pending)} {category} tweets across {len(groups)} threads")
+            logger.info(f"Embedding {len(pending)} {category} items across {len(groups)} threads")
             for batch in _pack(groups):
                 await self._embed_batch(batch, category)
 
@@ -73,7 +71,10 @@ class EmbedJob:
             threads[_thread_key(member)].append(member)
 
         return [
-            ThreadGroup(members=tuple(thread), target_ids=frozenset(target_ids.intersection(m.item_id for m in thread)))
+            ThreadGroup(
+                members=tuple(thread),
+                target_ids=frozenset(target_ids.intersection(m.item_id for m in thread)),
+            )
             for thread in threads.values()
         ]
 
@@ -85,7 +86,7 @@ class EmbedJob:
         descriptions: dict[str, str] = {}
         if any(media_paths[target] for target in targets):
             parts = _interleave(members, media_paths)
-            logger.info(f"VLM call: {len(members)} tweets, {sum(map(len, media_paths.values()))} media items")
+            logger.info(f"VLM call: {len(members)} items, {sum(map(len, media_paths.values()))} media items")
 
             captions = await self.vlm.describe_thread(parts)
             if captions is None:
@@ -101,9 +102,9 @@ class EmbedJob:
                 await self.db.mark_embedded(member.item_id, description)
 
     async def _collect_media(self, members: list[Item], targets: set[str]) -> tuple[dict[str, list[Path]], set[str]]:
-        """Media files for the target tweets, restored from their URLs when
-        missing. A tweet whose media can't be restored is marked failed and
-        dropped; the rest of the batch proceeds."""
+        """Media files for the target items, restored from their URLs when missing.
+        An item whose media can't be restored is marked failed and dropped; the rest
+        of the batch proceeds."""
         media_paths: dict[str, list[Path]] = {member.item_id: [] for member in members}
         usable = set(targets)
 
@@ -122,7 +123,7 @@ class EmbedJob:
     async def _index(self, item: Item, description: str | None, category: str):
         sections = [section for section in ((item.text or "").strip(), description) if section]
         if not sections:
-            return  # nothing searchable; the tweet stays archived either way
+            return  # nothing searchable; the item stays archived either way
 
         searchable = "\n\n".join(sections)
         await self.milvus.insert_embedding(
@@ -143,52 +144,44 @@ def _thread_key(item: Item) -> str:
 def _pack(groups: list[ThreadGroup]) -> Iterator[list[ThreadGroup]]:
     """Pack whole threads into VLM calls without splitting any thread."""
     batch: list[ThreadGroup] = []
-    media = tweets = 0
+    media = items = 0
 
     for group in groups:
-        overflows = (
-            media + group.planned_media > MAX_MEDIA_PER_CALL or tweets + len(group.members) > MAX_TWEETS_PER_CALL
-        )
+        overflows = media + group.planned_media > MAX_MEDIA_PER_CALL or items + len(group.members) > MAX_ITEMS_PER_CALL
         if batch and overflows:
             yield batch
-            batch, media, tweets = [], 0, 0
+            batch, media, items = [], 0, 0
         batch.append(group)
         media += group.planned_media
-        tweets += len(group.members)
+        items += len(group.members)
 
     if batch:
         yield batch
 
 
 def _interleave(members: list[Item], media_paths: dict[str, list[Path]]) -> list[ThreadPart]:
-    by_id = {member.item_id: member for member in members}
-
     parts: list[ThreadPart] = []
     for member in members:
-        parts.append(TextPart(_label(member, by_id)))
+        parts.append(TextPart(_label(member)))
         for path in media_paths[member.item_id]:
             if mime_type := guess_mime_type(path):
                 parts.append(MediaPart(path, mime_type))
     return parts
 
 
-def _label(member: Item, by_id: dict[str, Item]) -> str:
+def _label(member: Item) -> str:
+    # The [tweet_id:...] token is the id label the shared VLM client echoes back.
     label = f"[tweet_id:{member.item_id}]"
     if member.origin and member.origin not in SEED_ORIGINS:
         label += f" [{member.origin}]"
-    label += f" @{member.author_username}"
+    label += f" r/{member.subreddit} u/{member.author_username}" if member.subreddit else f" u/{member.author_username}"
     if text := (member.text or "").strip():
         label += f": {text}"
-
-    quoted = by_id.get(member.quoted_tweet_id) if member.quoted_tweet_id else None
-    if quoted and (quoted_text := (quoted.text or "").strip()):
-        label += f"\n  ↳ Quotes @{quoted.author_username}: {quoted_text}"
-
     return label
 
 
 def _merge_captions(captions: ThreadCaptions) -> dict[str, str]:
-    """Fold per-media captions into one description per tweet."""
+    """Fold per-media captions into one description per item."""
     merged: dict[str, str] = {}
     for caption in captions.captions:
         block = _caption_block(caption)

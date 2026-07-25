@@ -15,6 +15,7 @@ def require(**values: str | None):
     if missing := [name for name, value in values.items() if not value]:
         raise ConfigError(f"Missing required environment variables: {', '.join(missing)}")
 
+
 # Telegram (shared bot, per-platform chat IDs live in each platform's config)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ERRORS = int(os.getenv("TELEGRAM_CHAT_ERRORS", "0")) or None
@@ -22,7 +23,7 @@ TELEGRAM_MAX_FILE_SIZE_MB = int(os.getenv("TELEGRAM_MAX_FILE_SIZE_MB", "50"))
 TELEGRAM_BOT_API_URL = os.getenv("TELEGRAM_BOT_API_URL", "")
 
 # Behavior
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "30"))
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "240"))  # 4 hours
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "200"))
 CLEANUP_DOWNLOADS = os.getenv("CLEANUP_DOWNLOADS", "true").lower() == "true"
 
@@ -43,15 +44,20 @@ SEARCH_HYBRID_TOPK = int(os.getenv("SEARCH_HYBRID_TOPK", "50"))
 SEARCH_RRF_K = int(os.getenv("SEARCH_RRF_K", "60"))
 SEARCH_RERANK_TOPN = int(os.getenv("SEARCH_RERANK_TOPN", "10"))
 
-# Paths
+# Paths. Overridable so a container can point them at mounted volumes instead of the
+# repo layout, which is what keeps the archive outside the image.
 BASE_DIR = Path(__file__).parent.parent.parent
-DATA_DIR = BASE_DIR / "data"
-DOWNLOADS_DIR = BASE_DIR / "downloads"
-LOGS_DIR = BASE_DIR / "logs"
+DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR / "data")
+DOWNLOADS_DIR = Path(os.getenv("DOWNLOADS_DIR") or BASE_DIR / "downloads")
+LOGS_DIR = Path(os.getenv("LOGS_DIR") or BASE_DIR / "logs")
 
 # Retry
 MAX_DOWNLOAD_RETRIES = 3
 RETRY_BACKOFF_BASE = 30  # seconds
+MAX_ARCHIVE_ATTEMPTS = 3  # per item, across runs; --retry-failed clears the count
+# Video downloads are mostly yt-dlp waiting on the network, with a short ffmpeg mux at the
+# end, so several at once cost little CPU. Kept low to share the machine.
+DOWNLOAD_CONCURRENCY = int(os.getenv("DOWNLOAD_CONCURRENCY", "4"))
 
 # Logging
 LOG_ROTATION_DAYS = 30

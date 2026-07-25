@@ -42,9 +42,7 @@ class TelegramClient:
                 f"Media group total size is {total_mb:.2f} MB (exceeds {config.TELEGRAM_MAX_FILE_SIZE_MB} MB limit)"
             )
 
-    async def send_media(
-        self, chat_id: int, file_paths: list[Path], caption: str, max_retries: int = 3
-    ) -> list[int]:
+    async def send_media(self, chat_id: int, file_paths: list[Path], caption: str, max_retries: int = 3) -> list[int]:
         if len(file_paths) == 1:
             self._check_file_size(file_paths[0])
         else:
@@ -119,7 +117,9 @@ class TelegramClient:
             else:
                 media_group.append(InputMediaPhoto(media=data, caption=item_caption))
 
-        messages = await self.bot.send_media_group(chat_id=chat_id, media=media_group, read_timeout=120, write_timeout=120)
+        messages = await self.bot.send_media_group(
+            chat_id=chat_id, media=media_group, read_timeout=120, write_timeout=120
+        )
 
         if len(caption) > MAX_CAPTION_LENGTH:
             await self._send_full_caption(chat_id, caption)
@@ -136,7 +136,9 @@ class TelegramClient:
             chunk = file_paths[i : i + MAX_MEDIA_GROUP_SIZE]
             chunk_num = (i // MAX_MEDIA_GROUP_SIZE) + 1
             chunk_caption = (
-                f"{caption}\n\nPart {chunk_num}/{total_chunks}" if i == 0 else f"Part {chunk_num}/{total_chunks} (continued)"
+                f"{caption}\n\nPart {chunk_num}/{total_chunks}"
+                if i == 0
+                else f"Part {chunk_num}/{total_chunks} (continued)"
             )
             all_message_ids.extend(await self._send_media_group(chat_id, chunk, chunk_caption))
             if i + MAX_MEDIA_GROUP_SIZE < len(file_paths):
@@ -147,7 +149,9 @@ class TelegramClient:
     async def _send_full_caption(self, chat_id: int, caption: str) -> None:
         caption_file = io.BytesIO(caption.encode("utf-8"))
         caption_file.name = "caption.txt"
-        await self.bot.send_document(chat_id=chat_id, document=caption_file, filename="caption.txt", caption="Full caption")
+        await self.bot.send_document(
+            chat_id=chat_id, document=caption_file, filename="caption.txt", caption="Full caption"
+        )
 
     def _truncate(self, caption: str) -> str:
         if len(caption) <= MAX_CAPTION_LENGTH:

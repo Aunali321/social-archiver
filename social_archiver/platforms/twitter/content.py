@@ -35,18 +35,14 @@ def _build_entity_map(raw: Any) -> dict[int, dict[str, Any]]:
     return entity_map
 
 
-def _render_block_text(
-    block: dict[str, Any], entity_map: dict[int, dict[str, Any]]
-) -> str:
+def _render_block_text(block: dict[str, Any], entity_map: dict[int, dict[str, Any]]) -> str:
     """Apply inline LINK entities as markdown links. Processed back-to-front so
     earlier offsets stay valid as later ranges are rewritten."""
     text = block.get("text", "")
     ranges = [
         r
         for r in (block.get("entityRanges") or [])
-        if (e := entity_map.get(r.get("key")))
-        and e.get("type") == "LINK"
-        and e.get("data", {}).get("url")
+        if (e := entity_map.get(r.get("key"))) and e.get("type") == "LINK" and e.get("data", {}).get("url")
     ]
     for r in sorted(ranges, key=lambda r: r["offset"], reverse=True):
         url = entity_map[r["key"]]["data"]["url"]
@@ -55,9 +51,7 @@ def _render_block_text(
     return text.strip()
 
 
-def _render_atomic_block(
-    block: dict[str, Any], entity_map: dict[int, dict[str, Any]]
-) -> str | None:
+def _render_atomic_block(block: dict[str, Any], entity_map: dict[int, dict[str, Any]]) -> str | None:
     """Atomic blocks are placeholders for embedded entities (code, tweets, ...)."""
     ranges = block.get("entityRanges") or []
     if not ranges:
@@ -73,11 +67,7 @@ def _render_atomic_block(
             return "---"
         case "TWEET":
             tweet_id = data.get("tweetId")
-            return (
-                f"[Embedded Tweet: https://x.com/i/status/{tweet_id}]"
-                if tweet_id
-                else None
-            )
+            return f"[Embedded Tweet: https://x.com/i/status/{tweet_id}]" if tweet_id else None
         case "LINK":
             url = data.get("url")
             return f"[Link: {url}]" if url else None
@@ -136,11 +126,7 @@ def _article_result(result: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(article, dict):
         return None
     inner = article.get("article_results", {}).get("result")
-    if (
-        isinstance(inner, dict)
-        and inner.get("rest_id")
-        and _first_text(inner.get("title"))
-    ):
+    if isinstance(inner, dict) and inner.get("rest_id") and _first_text(inner.get("title")):
         return inner
     return None
 

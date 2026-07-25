@@ -11,29 +11,34 @@ from social_archiver.core.scheduler import DaemonScheduler
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.core.utils import setup_logging
 from social_archiver.llm.factory import create_vlm_client
-from social_archiver.platforms.twitter import config
-from social_archiver.platforms.twitter.archiver import ArchiveJob
-from social_archiver.platforms.twitter.client import TwitterClient
-from social_archiver.platforms.twitter.embedder import EmbedJob
-from social_archiver.platforms.twitter.port import TwitterPort
+from social_archiver.platforms.reddit import config
+from social_archiver.platforms.reddit.archiver import ArchiveJob
+from social_archiver.platforms.reddit.client import RedditClient
+from social_archiver.platforms.reddit.embedder import EmbedJob
+from social_archiver.platforms.reddit.port import RedditPort
 
 logger = logging.getLogger(__name__)
 
-PORT = TwitterPort()
+PORT = RedditPort()
 
-MILVUS_COLLECTIONS = {"likes": "twitter_likes", "bookmarks": "twitter_bookmarks"}
+MILVUS_COLLECTIONS = {
+    "saved": "reddit_saved",
+    "upvoted": "reddit_upvoted",
+    "downvoted": "reddit_downvoted",
+    "own": "reddit_own",
+}
 
 
 async def archive(fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
     config.validate_archive()
-    tw_client = TwitterClient()
+    client = RedditClient()
     try:
-        if not await tw_client.verify_credentials():
-            raise RuntimeError("Twitter credential verification failed")
+        logger.info(f"Authenticated as u/{await client.verify()}")
+        tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
         async with Database(config.DATABASE_PATH) as db:
-            await ArchiveJob(tw_client, db, PORT, TelegramClient()).run(fetch_all, category, retry_failed)
+            await ArchiveJob(client, db, PORT, tg).run(fetch_all, category, retry_failed)
     finally:
-        await tw_client.close()
+        await client.close()
 
 
 async def upload(retry_failed: bool = False):
@@ -48,7 +53,7 @@ async def embed(retry_failed: bool = False):
     vlm_client, model_name = create_vlm_client(config.VLM_PROVIDER)
     logger.info(f"Embedding with provider={config.VLM_PROVIDER}, model={model_name}")
 
-    milvus = MilvusManager(uri=config.TWITTER_MILVUS_URI, collections=MILVUS_COLLECTIONS)
+    milvus = MilvusManager(uri=config.REDDIT_MILVUS_URI, collections=MILVUS_COLLECTIONS)
     milvus.initialize_collections()
     try:
         async with Database(config.DATABASE_PATH) as db:
@@ -66,9 +71,9 @@ async def run_all(fetch_all: bool = False):
 
 
 def main():
-    args = build_parser("Twitter/X archiver", categories=("likes", "bookmarks")).parse_args()
+    args = build_parser("Reddit archiver", categories=("saved", "upvoted", "downvoted", "own")).parse_args()
     setup_logging(config.LOG_FILE)
-    logger.info(f"Twitter archiver: {args.command}")
+    logger.info(f"Reddit archiver: {args.command}")
 
     match args.command:
         case "archive":

@@ -43,9 +43,7 @@ class VLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(
-        self, media_path: Path, media_type: str, thread_context: str | None = None
-    ) -> str | None:
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> str | None:
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
             return None
@@ -72,12 +70,18 @@ class VLMClient:
         return await self._call_openrouter(payload)
 
     def _get_image_mime_type(self, path: Path) -> str:
-        return {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-                ".gif": "image/gif", ".webp": "image/webp"}.get(path.suffix.lower(), "image/jpeg")
+        return {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower(), "image/jpeg")
 
     def _get_video_mime_type(self, path: Path) -> str:
-        return {".mp4": "video/mp4", ".mov": "video/quicktime",
-                ".avi": "video/x-msvideo", ".webm": "video/webm"}.get(path.suffix.lower(), "video/mp4")
+        return {".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo", ".webm": "video/webm"}.get(
+            path.suffix.lower(), "video/mp4"
+        )
 
     async def _call_openrouter(self, payload: dict) -> str | None:
         headers = {
@@ -89,7 +93,9 @@ class VLMClient:
         for attempt in range(1, self.max_retries + 1):
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    response = await client.post(f"{OPENROUTER_BASE_URL}/chat/completions", headers=headers, json=payload)
+                    response = await client.post(
+                        f"{OPENROUTER_BASE_URL}/chat/completions", headers=headers, json=payload
+                    )
 
                     if response.status_code in (401, 402, 403):
                         logger.error(f"Auth error ({response.status_code}): {response.text[:200]}")

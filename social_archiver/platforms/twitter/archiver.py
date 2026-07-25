@@ -2,13 +2,16 @@ import asyncio
 import logging
 import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from social_archiver.core.database import Database
-from social_archiver.core.jobs import ensure_media
+from social_archiver.core.jobs import download_pending
 from social_archiver.core.telegram_client import TelegramClient
+from social_archiver.platforms.twitter import config
 from social_archiver.platforms.twitter.client import TwitterClient
 from social_archiver.platforms.twitter.expander import TweetExpander
+from social_archiver.platforms.twitter.fetchers.export import parse_like_export
 from social_archiver.platforms.twitter.port import PLATFORM, TwitterPort
 
 logger = logging.getLogger(__name__)
@@ -41,11 +44,11 @@ class ArchiveJob:
         self.port = port
         self.tg = tg
 
-    async def run(self, fetch_all: bool = False, category: str | None = None):
+    async def run(self, fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
         for cat in CATEGORIES:
             if self.port.chats[cat.name] and category in (None, cat.name):
                 await self._archive_category(cat, fetch_all)
-        await self._download_pending()
+        await download_pending(self.db, self.port, retry_failed)
 
     async def _archive_category(self, category: Category, fetch_all: bool):
         logger.info(f"Archiving {category.name} (fetch_all={fetch_all})")
@@ -73,10 +76,14 @@ class ArchiveJob:
             logger.info(f"Cursor-based sync: {len(known_ids)} known {category.seed_origin} tweets")
 
         seeds = await self._fetch_seeds(category, known_ids)
-        if not seeds:
-            logger.info(f"No {category.name} found")
-            return
+        if seeds:
+            await self._expand_and_record(category, seeds)
+        else:
+            logger.info(f"No new {category.name} from the timeline")
 
+        await self._backfill_from_export(category)
+
+    async def _expand_and_record(self, category: Category, seeds: list[dict[str, Any]]):
         expander = TweetExpander(self.tw_client, page_delay=PAGE_DELAY, seed_origin=category.seed_origin)
         tweets = await expander.expand(seeds)
         logger.info(f"Expanded {len(seeds)} {category.name} into {len(tweets)} tweets")
@@ -103,18 +110,27 @@ class ArchiveJob:
             raise RuntimeError(f"Fetching {category.name} failed: {result['error']}")
         return result["tweets"]
 
-    async def _download_pending(self):
-        pending = await self.db.pending_archive(PLATFORM)
-        if not pending:
+    async def _backfill_from_export(self, category: Category):
+        """Backfill likes from the official export in resumable chunks: like.js holds
+        every like id ever, past the Likes-timeline cap. Twitter rate-limits hard, so a
+        full pass is impossible in one go — each chunk is expanded and committed before
+        the next, so a stopped run resumes from the database. No bookmarks in exports."""
+        if category.name != "likes" or not config.TWITTER_EXPORT_PATH:
+            return
+        path = Path(config.TWITTER_EXPORT_PATH)
+        if not path.exists():
+            logger.warning(f"TWITTER_EXPORT_PATH does not exist, skipping export ingest: {path}")
             return
 
-        logger.info(f"Downloading media for {len(pending)} tweets")
-        for item in pending:
-            try:
-                await ensure_media(self.db, self.port, item)
-            except Exception as e:
-                logger.error(f"Download failed for {item.item_id}: {e}")
-                await self.db.mark_archive_failed(item.item_id, str(e))
+        export_seeds = parse_like_export(path)
+        while True:
+            existing = await self.db.all_ids(PLATFORM)
+            queued = [seed for seed in export_seeds if seed["id"] not in existing]
+            if not queued:
+                break
+            chunk = queued[: config.TWITTER_EXPORT_BATCH]
+            logger.info(f"Export backfill: expanding {len(chunk)} likes ({len(queued) - len(chunk)} still queued)")
+            await self._expand_and_record(category, chunk)
 
 
 def _is_rate_limit(error: Exception) -> bool:

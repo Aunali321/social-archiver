@@ -2,6 +2,7 @@
 Uses cookie-based authentication (auth_token + ct0) to access Twitter's
 internal GraphQL endpoints.
 """
+
 import asyncio
 import json
 import logging
@@ -149,6 +150,7 @@ USER_AGENT = (
 class ThreadResult:
     """Tweets from a conversation plus tombstones for tweets that exist in the
     reply graph but are no longer available (deleted, protected, suspended)."""
+
     tweets: list[dict[str, Any]] = field(default_factory=list)
     tombstones: dict[str, str] = field(default_factory=dict)  # tweet_id -> reason
 
@@ -156,6 +158,7 @@ class ThreadResult:
 @dataclass
 class BatchLookupResult:
     """Result of a TweetResultsByRestIds batch lookup."""
+
     tweets: list[dict[str, Any]] = field(default_factory=list)
     missing: set[str] = field(default_factory=set)  # requested but not returned (deleted/protected/suspended)
 
@@ -318,7 +321,11 @@ class TwitterClient:
             if error and "404" in error:
                 for query_id in query_ids:
                     post_success, post_data, _ = await self._graphql_post(
-                        "TweetDetail", query_id, variables, TWEET_DETAIL_FEATURES, field_toggles=TWEET_DETAIL_FIELD_TOGGLES
+                        "TweetDetail",
+                        query_id,
+                        variables,
+                        TWEET_DETAIL_FEATURES,
+                        field_toggles=TWEET_DETAIL_FIELD_TOGGLES,
                     )
                     if post_success:
                         return self._parse_tweet_detail_response(post_data, tweet_id)
@@ -458,7 +465,11 @@ class TwitterClient:
             }
             query_ids = self._get_query_ids("TweetResultsByRestIds")
             success, data, error = await self._graphql_get_with_fallbacks(
-                "TweetResultsByRestIds", query_ids, variables, TWEET_DETAIL_FEATURES, field_toggles=ARTICLE_FIELD_TOGGLES
+                "TweetResultsByRestIds",
+                query_ids,
+                variables,
+                TWEET_DETAIL_FEATURES,
+                field_toggles=ARTICLE_FIELD_TOGGLES,
             )
             if not success:
                 raise RuntimeError(f"TweetResultsByRestIds failed for {len(chunk)} ids: {error}")
@@ -595,7 +606,9 @@ class TwitterClient:
             "next_cursor": _extract_cursor(instructions),
         }
 
-    async def get_all_bookmarks(self, limit: int = 0, page_delay: float = 1.0, known_ids: set | None = None) -> dict[str, Any]:
+    async def get_all_bookmarks(
+        self, limit: int = 0, page_delay: float = 1.0, known_ids: set | None = None
+    ) -> dict[str, Any]:
         """Fetch all bookmarks with pagination. limit=0 means all. Stops early on known_ids hits."""
         return await self._paginate(self.get_bookmarks, limit=limit, page_delay=page_delay, known_ids=known_ids)
 
@@ -649,7 +662,12 @@ class TwitterClient:
             return {"success": False, "error": error, "tweets": []}
 
         instructions = (
-            data.get("data", {}).get("user", {}).get("result", {}).get("timeline", {}).get("timeline", {}).get("instructions", [])
+            data.get("data", {})
+            .get("user", {})
+            .get("result", {})
+            .get("timeline", {})
+            .get("timeline", {})
+            .get("instructions", [])
         )
         return {
             "success": True,
@@ -657,7 +675,9 @@ class TwitterClient:
             "next_cursor": _extract_cursor(instructions),
         }
 
-    async def get_all_likes(self, limit: int = 0, page_delay: float = 1.0, known_ids: set | None = None) -> dict[str, Any]:
+    async def get_all_likes(
+        self, limit: int = 0, page_delay: float = 1.0, known_ids: set | None = None
+    ) -> dict[str, Any]:
         """Fetch all likes with pagination. limit=0 means all. Stops early on known_ids hits."""
         return await self._paginate(self.get_likes, limit=limit, page_delay=page_delay, known_ids=known_ids)
 
@@ -827,7 +847,9 @@ def _extract_media(result: dict | None) -> list[dict[str, Any]]:
             variants = video_info.get("variants", [])
             mp4_variants = [v for v in variants if v.get("content_type") == "video/mp4" and v.get("url")]
             with_bitrate = sorted(
-                (v for v in mp4_variants if v.get("bitrate") is not None), key=lambda v: v.get("bitrate", 0), reverse=True
+                (v for v in mp4_variants if v.get("bitrate") is not None),
+                key=lambda v: v.get("bitrate", 0),
+                reverse=True,
             )
             selected = with_bitrate[0] if with_bitrate else (mp4_variants[0] if mp4_variants else None)
             if selected:
@@ -952,9 +974,7 @@ def _find_tweet_in_instructions(instructions: list[dict], tweet_id: str) -> dict
 _NON_CONVERSATION_ENTRY_PREFIXES = ("tweetdetailrelatedtweets", "who-to-follow", "tweet-composer")
 
 
-def _parse_tweets_from_instructions(
-    instructions: list[dict], exclude_related: bool = False
-) -> list[dict[str, Any]]:
+def _parse_tweets_from_instructions(instructions: list[dict], exclude_related: bool = False) -> list[dict[str, Any]]:
     tweets = []
     seen = set()
 

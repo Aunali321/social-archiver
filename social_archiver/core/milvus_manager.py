@@ -3,7 +3,16 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from pymilvus import AnnSearchRequest, CollectionSchema, DataType, Function, FunctionType, FieldSchema, MilvusClient, RRFRanker
+from pymilvus import (
+    AnnSearchRequest,
+    CollectionSchema,
+    DataType,
+    Function,
+    FunctionType,
+    FieldSchema,
+    MilvusClient,
+    RRFRanker,
+)
 
 logger = logging.getLogger(__name__)
 

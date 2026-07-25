@@ -7,10 +7,15 @@ _VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".webm", ".mkv"}
 _PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 _MIME_TYPES = {
-    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-    ".gif": "image/gif", ".webp": "image/webp",
-    ".mp4": "video/mp4", ".mov": "video/quicktime",
-    ".avi": "video/x-msvideo", ".webm": "video/webm",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".webm": "video/webm",
 }
 
 

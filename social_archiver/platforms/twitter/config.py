@@ -16,8 +16,15 @@ from social_archiver.core.config import (
 TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN")
 TWITTER_CT0 = os.getenv("TWITTER_CT0")
 TWITTER_API_BASE = "https://x.com/i/api/graphql"
-TWITTER_BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+TWITTER_BEARER_TOKEN = (
+    "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+)
 TWITTER_DELAY_RANGE = [2, 5]
+
+# Official data export (.zip or extracted dir); like.js backfills full like history.
+# Ingested in chunks so a rate-limited run commits progress and resumes.
+TWITTER_EXPORT_PATH = os.getenv("TWITTER_EXPORT_PATH")
+TWITTER_EXPORT_BATCH = int(os.getenv("TWITTER_EXPORT_BATCH", "250"))
 
 # Telegram channels; a category is enabled by configuring its channel
 TELEGRAM_CHAT_LIKES = int(os.getenv("TWITTER_CHAT_LIKES", "0"))

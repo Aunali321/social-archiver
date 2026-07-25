@@ -27,7 +27,9 @@ def create_vlm_client(provider: str) -> tuple[Any, str]:
             raise VLMConfigError("VLM_PROVIDER=gemini but GEMINI_API_KEY is not set")
         from social_archiver.llm.gemini_client import GeminiClient
 
-        client = GeminiClient(api_key=config.GEMINI_API_KEY, model=config.GEMINI_MODEL, timeout=config.EMBEDDING_TIMEOUT)
+        client = GeminiClient(
+            api_key=config.GEMINI_API_KEY, model=config.GEMINI_MODEL, timeout=config.EMBEDDING_TIMEOUT
+        )
         return client, config.GEMINI_MODEL
 
     if not config.OPENROUTER_API_KEY:

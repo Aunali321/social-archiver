@@ -6,6 +6,7 @@ Usage:
     uv run python scripts/search.py stats --platform twitter
     uv run python scripts/search.py init --platform instagram
 """
+
 import argparse
 import asyncio
 import logging

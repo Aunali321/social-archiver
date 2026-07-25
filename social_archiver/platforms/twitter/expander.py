@@ -18,6 +18,7 @@ Fetch strategy (see X_RESEARCH.md for the measurements behind it):
 
 The phases loop until nothing new is discovered.
 """
+
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -202,10 +203,13 @@ class TweetExpander:
         for author, conv in pairs:
             if (author, conv) not in found_pairs and conv not in self._detail_fetched:
                 focal = next(
-                    (tid for tid in self._archived
-                     if (t := self._tweets.get(tid))
-                     and t.get("author_username") == author
-                     and (t.get("conversation_id") or tid) == conv),
+                    (
+                        tid
+                        for tid in self._archived
+                        if (t := self._tweets.get(tid))
+                        and t.get("author_username") == author
+                        and (t.get("conversation_id") or tid) == conv
+                    ),
                     None,
                 )
                 if focal:

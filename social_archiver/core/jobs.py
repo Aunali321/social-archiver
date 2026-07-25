@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import traceback
 from pathlib import Path
@@ -11,6 +12,8 @@ from social_archiver.core.downloader import download_urls, download_with_retry
 from social_archiver.core.telegram_client import TelegramClient
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_EVERY = 100
 
 
 class PlatformPort(Protocol):
@@ -43,6 +46,48 @@ async def ensure_media(db: Database, port: PlatformPort, item: Item) -> list[Pat
     )
     await db.mark_archived(item.item_id, paths)
     return paths
+
+
+async def download_item(db: Database, port: PlatformPort, item: Item) -> bool:
+    """Download one item's media, recording a failed attempt instead of raising,
+    so one dead media never stops the run. Returns whether it landed."""
+    try:
+        await ensure_media(db, port, item)
+        return True
+    except Exception as e:
+        attempt = item.archive_attempts + 1
+        logger.error(f"Download failed for {item.item_id} (attempt {attempt}/{config.MAX_ARCHIVE_ATTEMPTS}): {e}")
+        await db.mark_archive_failed(item.item_id, str(e))
+        return False
+
+
+async def download_pending(db: Database, port: PlatformPort, retry_failed: bool = False):
+    """Download media for every recorded item that still needs it, several at a time:
+    a single video costs tens of seconds in yt-dlp and ffmpeg, almost all of it spent
+    waiting, so downloading one at a time leaves the machine idle. An item that fails
+    MAX_ARCHIVE_ATTEMPTS times is left alone until --retry-failed."""
+    if retry_failed:
+        reset = await db.reset_archive_failures(port.platform)
+        logger.info(f"Cleared the attempt count on {reset} previously-failed items")
+
+    pending = await db.pending_archive(port.platform, config.MAX_ARCHIVE_ATTEMPTS)
+    if not pending:
+        return
+
+    total = len(pending)
+    logger.info(f"Downloading media for {total} items, {config.DOWNLOAD_CONCURRENCY} at a time")
+    semaphore = asyncio.Semaphore(config.DOWNLOAD_CONCURRENCY)
+    completed = 0
+
+    async def download(item: Item):
+        nonlocal completed
+        async with semaphore:
+            await download_item(db, port, item)
+        completed += 1
+        if completed % _PROGRESS_EVERY == 0 or completed == total:
+            logger.info(f"Downloaded {completed}/{total} items")
+
+    await asyncio.gather(*(download(item) for item in pending))
 
 
 class UploadJob:

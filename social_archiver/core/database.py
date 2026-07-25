@@ -70,12 +70,17 @@ class Item:
     shared_by_username: str | None = None
     product_type: str | None = None
 
+    # Reddit-specific
+    subreddit: str | None = None
+    link_url: str | None = None  # a link post's outbound target, which post_url is not
+
     archive_status: ArchiveStatus = ArchiveStatus.PENDING
     upload_status: StageStatus = StageStatus.PENDING
     embed_status: StageStatus = StageStatus.PENDING
     archive_error: str | None = None
     upload_error: str | None = None
     embed_error: str | None = None
+    archive_attempts: int = 0
 
     local_paths: list[Path] = field(default_factory=list)
     telegram_message_ids: list[int] = field(default_factory=list)
@@ -117,12 +122,15 @@ class Item:
             collection_name=row["collection_name"],
             shared_by_username=row["shared_by_username"],
             product_type=row["product_type"],
+            subreddit=row["subreddit"],
+            link_url=row["link_url"],
             archive_status=ArchiveStatus(row["archive_status"]),
             upload_status=StageStatus(row["upload_status"]),
             embed_status=StageStatus(row["embed_status"]),
             archive_error=row["archive_error"],
             upload_error=row["upload_error"],
             embed_error=row["embed_error"],
+            archive_attempts=row["archive_attempts"],
             local_paths=[Path(p) for p in json.loads(row["local_paths"] or "[]")],
             telegram_message_ids=json.loads(row["telegram_message_ids"] or "[]"),
             vlm_description=row["vlm_description"],
@@ -204,6 +212,8 @@ class Database:
                 collection_name TEXT,
                 shared_by_username TEXT,
                 product_type TEXT,
+                subreddit TEXT,
+                link_url TEXT,
 
                 archive_status TEXT NOT NULL DEFAULT 'pending',
                 upload_status TEXT NOT NULL DEFAULT 'pending',
@@ -211,6 +221,7 @@ class Database:
                 archive_error TEXT,
                 upload_error TEXT,
                 embed_error TEXT,
+                archive_attempts INTEGER NOT NULL DEFAULT 0,
 
                 local_paths TEXT,
                 telegram_message_ids TEXT,
@@ -231,7 +242,54 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_items_author ON items(author_username);
             CREATE INDEX IF NOT EXISTS idx_items_thread_root ON items(thread_root_id);
             CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at);
+
+            -- An item can belong to several categories at once (a post you wrote is also
+            -- one you upvoted), which items.category alone cannot express: it only records
+            -- whichever pass inserted the row first.
+            CREATE TABLE IF NOT EXISTS item_categories (
+                item_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                PRIMARY KEY (item_id, category)
+            );
+            CREATE INDEX IF NOT EXISTS idx_item_categories_category ON item_categories(category);
+
+            -- Where a history walk had got to, so an interrupted one resumes instead of
+            -- paging from the top again. Only a full backfill writes here.
+            CREATE TABLE IF NOT EXISTS fetch_cursors (
+                platform TEXT NOT NULL,
+                category TEXT NOT NULL,
+                cursor TEXT NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (platform, category)
+            );
         """)
+        await self._connection.commit()
+
+    async def get_cursor(self, platform: str, category: str) -> str:
+        cursor = await self._connection.execute(
+            "SELECT cursor FROM fetch_cursors WHERE platform = ? AND category = ?", (platform, category)
+        )
+        row = await cursor.fetchone()
+        return row["cursor"] if row else ""
+
+    async def set_cursor(self, platform: str, category: str, cursor: str):
+        """Call only after the page's items are committed. In that order a crash costs one
+        refetched page, which INSERT OR IGNORE absorbs; the reverse skips a page for good."""
+        await self._connection.execute(
+            """
+            INSERT INTO fetch_cursors (platform, category, cursor, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(platform, category) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at
+            """,
+            (platform, category, cursor, datetime.now().isoformat()),
+        )
+        await self._connection.commit()
+
+    async def clear_cursor(self, platform: str, category: str):
+        """A walk that reached the end has nothing to resume from, so the next full run
+        starts from the top rather than replaying the last page forever."""
+        await self._connection.execute(
+            "DELETE FROM fetch_cursors WHERE platform = ? AND category = ?", (platform, category)
+        )
         await self._connection.commit()
 
     async def insert(self, item: Item):
@@ -241,7 +299,23 @@ class Database:
             f"INSERT OR IGNORE INTO items ({columns}) VALUES ({placeholders})",
             [_to_column(item, name) for name in _ITEM_COLUMNS],
         )
+        await self._connection.execute(
+            "INSERT OR IGNORE INTO item_categories (item_id, category) VALUES (?, ?)",
+            (item.item_id, item.category),
+        )
         await self._connection.commit()
+
+    async def add_categories(self, pairs: Iterable[tuple[str, str]]):
+        """Record category membership for items that already exist, which is how an item
+        archived under one category gets attributed to the others it also belongs to."""
+        await self._connection.executemany(
+            "INSERT OR IGNORE INTO item_categories (item_id, category) VALUES (?, ?)", list(pairs)
+        )
+        await self._connection.commit()
+
+    async def categories_for(self, item_id: str) -> set[str]:
+        cursor = await self._connection.execute("SELECT category FROM item_categories WHERE item_id = ?", (item_id,))
+        return {row["category"] for row in await cursor.fetchall()}
 
     async def get(self, item_id: str) -> Item | None:
         cursor = await self._connection.execute("SELECT * FROM items WHERE item_id = ?", (item_id,))
@@ -254,7 +328,8 @@ class Database:
 
     async def ids_by_origin(self, platform: str, origin: str) -> set[str]:
         cursor = await self._connection.execute(
-            "SELECT item_id FROM items WHERE platform = ? AND origin = ?", (platform, origin)
+            "SELECT item_id FROM items WHERE platform = ? AND origin = ?",
+            (platform, origin),
         )
         return {row["item_id"] for row in await cursor.fetchall()}
 
@@ -265,7 +340,7 @@ class Database:
         cursor = await self._connection.execute(
             """
             UPDATE items SET origin = ?
-            WHERE item_id = ? AND origin IN ('thread', 'parent', 'quoted', 'linked', 'retweet', 'liked_reply')
+            WHERE item_id = ? AND origin IN ('thread', 'parent', 'quoted', 'linked', 'retweet', 'liked_reply', 'submission')
             """,
             (origin, item_id),
         )
@@ -276,10 +351,17 @@ class Database:
         cursor = await self._connection.execute(query, tuple(params))
         return [Item.from_row(row) for row in await cursor.fetchall()]
 
-    async def pending_archive(self, platform: str) -> list[Item]:
+    async def pending_archive(self, platform: str, max_attempts: int) -> list[Item]:
+        """Never-tried items plus previously-failed ones still under the attempt cap.
+        Items that exhaust the cap stay 'failed' until --retry-failed clears the count."""
         return await self._select_items(
-            "SELECT * FROM items WHERE platform = ? AND archive_status IN ('pending', 'failed') ORDER BY fetched_at",
-            (platform,),
+            """
+            SELECT * FROM items
+            WHERE platform = ?
+              AND (archive_status = 'pending' OR (archive_status = 'failed' AND archive_attempts < ?))
+            ORDER BY fetched_at
+            """,
+            (platform, max_attempts),
         )
 
     async def _pending_stage(self, stage: str, platform: str, category: str, include_failed: bool) -> list[Item]:
@@ -330,18 +412,63 @@ class Database:
     async def mark_archived(self, item_id: str, local_paths: list[Path]):
         await self._connection.execute(
             """
-            UPDATE items SET archive_status = 'archived', archived_at = ?, local_paths = ?, archive_error = NULL
+            UPDATE items
+            SET archive_status = 'archived', archived_at = ?, local_paths = ?,
+                archive_error = NULL, archive_attempts = 0
             WHERE item_id = ?
             """,
-            (datetime.now().isoformat(), json.dumps([str(p) for p in local_paths]) if local_paths else None, item_id),
+            (
+                datetime.now().isoformat(),
+                json.dumps([str(p) for p in local_paths]) if local_paths else None,
+                item_id,
+            ),
         )
         await self._connection.commit()
 
     async def mark_archive_failed(self, item_id: str, error: str):
         await self._connection.execute(
-            "UPDATE items SET archive_status = 'failed', archive_error = ? WHERE item_id = ?", (error, item_id)
+            """
+            UPDATE items
+            SET archive_status = 'failed', archive_error = ?, archive_attempts = archive_attempts + 1
+            WHERE item_id = ?
+            """,
+            (error, item_id),
         )
         await self._connection.commit()
+
+    async def failed_archive(self, platform: str) -> list[Item]:
+        return await self._select_items(
+            "SELECT * FROM items WHERE platform = ? AND archive_status = 'failed' ORDER BY fetched_at",
+            (platform,),
+        )
+
+    async def refresh_media(self, item_id: str, urls: list[str], kinds: list[str], count: int) -> bool:
+        """Replace an item's stored media urls. `ensure_media` only ever retries the urls
+        already on the row, so a wrong or expired one can never recover without this."""
+        cursor = await self._connection.execute(
+            """
+            UPDATE items SET media_urls = ?, media_types = ?, media_count = ?, has_media = ?
+            WHERE item_id = ? AND media_urls IS NOT ?
+            """,
+            (
+                json.dumps(urls) if urls else None,
+                json.dumps(kinds) if kinds else None,
+                count,
+                int(bool(urls)),
+                item_id,
+                json.dumps(urls) if urls else None,
+            ),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
+    async def reset_archive_failures(self, platform: str) -> int:
+        cursor = await self._connection.execute(
+            "UPDATE items SET archive_attempts = 0 WHERE platform = ? AND archive_status = 'failed'",
+            (platform,),
+        )
+        await self._connection.commit()
+        return cursor.rowcount
 
     async def mark_uploaded(self, item_id: str, message_ids: list[int]):
         await self._connection.execute(
@@ -355,7 +482,8 @@ class Database:
 
     async def mark_upload_failed(self, item_id: str, error: str):
         await self._connection.execute(
-            "UPDATE items SET upload_status = 'failed', upload_error = ? WHERE item_id = ?", (error, item_id)
+            "UPDATE items SET upload_status = 'failed', upload_error = ? WHERE item_id = ?",
+            (error, item_id),
         )
         await self._connection.commit()
 
@@ -371,7 +499,8 @@ class Database:
 
     async def mark_embed_failed(self, item_id: str, error: str):
         await self._connection.execute(
-            "UPDATE items SET embed_status = 'failed', embed_error = ? WHERE item_id = ?", (error, item_id)
+            "UPDATE items SET embed_status = 'failed', embed_error = ? WHERE item_id = ?",
+            (error, item_id),
         )
         await self._connection.commit()
 

@@ -1,4 +1,5 @@
 """Simplified tweet data model for the Twitter archiver."""
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -20,6 +21,7 @@ class TweetMedia:
 @dataclass
 class SimpleTweet:
     """Simplified tweet with fields needed for download/upload and full linking."""
+
     id: str
     text: str
     author_username: str
