@@ -24,6 +24,8 @@ TELEGRAM_BOT_API_URL = os.getenv("TELEGRAM_BOT_API_URL", "")
 
 # Behavior
 CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "240"))  # 4 hours
+# A restart should not trigger a fetch; the daemon waits for its first interval
+RUN_ON_START = os.getenv("RUN_ON_START", "false").lower() == "true"
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "200"))
 CLEANUP_DOWNLOADS = os.getenv("CLEANUP_DOWNLOADS", "true").lower() == "true"
 
