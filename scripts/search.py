@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from social_archiver.core import config
 from social_archiver.core.database import Database
 from social_archiver.core.milvus_manager import MilvusManager
-from social_archiver.llm import local_embedder, reranker
+from social_archiver.llm import embed_client, rerank_client
 from social_archiver.platforms.instagram import config as instagram_config
 from social_archiver.platforms.twitter import config as twitter_config
 
@@ -47,7 +47,7 @@ def search(platform: str, query: str, category: str, limit: int, no_rerank: bool
     print(f"Searching '{query}' in {platform}/{category}...\n")
 
     milvus = _milvus(platform)
-    query_embedding = local_embedder.embed_query(query)
+    query_embedding = embed_client.embed_query(query)
 
     candidates = milvus.hybrid_search(
         category=category,
@@ -62,12 +62,13 @@ def search(platform: str, query: str, category: str, limit: int, no_rerank: bool
         milvus.close()
         return
 
-    if no_rerank:
-        asyncio.run(_display(platform, candidates[:limit]))
-    else:
+    ranked = candidates[:limit]
+    if not no_rerank:
         docs = [c.get("text", "") or c.get("caption", "") or "" for c in candidates[:10]]
-        reranked = reranker.rerank(query, docs, top_n=limit)
-        asyncio.run(_display(platform, [candidates[item["index"]] for item in reranked]))
+        # Empty when no rerank server is configured, leaving the vector order in place
+        if reranked := rerank_client.rerank(query, docs, top_n=limit):
+            ranked = [candidates[item["index"]] for item in reranked]
+    asyncio.run(_display(platform, ranked))
 
     milvus.close()
 

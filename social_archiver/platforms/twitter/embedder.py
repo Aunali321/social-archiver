@@ -8,7 +8,7 @@ from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import ensure_media
 from social_archiver.core.media_kind import guess_mime_type
 from social_archiver.core.milvus_manager import MilvusManager
-from social_archiver.llm import local_embedder
+from social_archiver.llm import embed_client
 from social_archiver.llm.vertex_client import (
     MediaCaption,
     MediaPart,
@@ -128,7 +128,7 @@ class EmbedJob:
         await self.milvus.insert_embedding(
             category=category,
             item_id=item.item_id,
-            embedding=local_embedder.embed_document(searchable),
+            embedding=embed_client.embed_document(searchable),
             text=searchable,
             media_type="media" if description else "text",
             caption=item.text,

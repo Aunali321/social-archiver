@@ -39,6 +39,17 @@ VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "300"))
 
+# Embedding and reranking run on a separate OpenAI-compatible server, so the archiver
+# needs no ML runtime of its own. vLLM, llama.cpp and TEI all serve these shapes.
+EMBED_URL = os.getenv("EMBED_URL", "http://localhost:8000/v1/embeddings")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "jinaai/jina-embeddings-v5-omni-small")
+# Asymmetric retrieval prefixes, which differ per model family
+EMBED_QUERY_PREFIX = os.getenv("EMBED_QUERY_PREFIX", "Query: ")
+EMBED_DOC_PREFIX = os.getenv("EMBED_DOC_PREFIX", "Document: ")
+# Reranking is optional: unset RERANK_URL and search returns vector order
+RERANK_URL = os.getenv("RERANK_URL", "")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "jinaai/jina-reranker-v3")
+
 # Search
 SEARCH_HYBRID_TOPK = int(os.getenv("SEARCH_HYBRID_TOPK", "50"))
 SEARCH_RRF_K = int(os.getenv("SEARCH_RRF_K", "60"))

@@ -6,7 +6,7 @@ from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import ensure_media
 from social_archiver.core.media_kind import guess_media_kind
 from social_archiver.core.milvus_manager import MilvusManager
-from social_archiver.llm import local_embedder
+from social_archiver.llm import embed_client
 from social_archiver.llm.vertex_client import VertexVLMClient
 from social_archiver.platforms.instagram.port import PLATFORM, InstagramPort
 
@@ -69,7 +69,7 @@ class EmbedJob:
         await self.milvus.insert_embedding(
             category=item.category,
             item_id=item.item_id,
-            embedding=local_embedder.embed_document(searchable),
+            embedding=embed_client.embed_document(searchable),
             text=searchable,
             media_type=kind,
             resource_index=resource_index,
