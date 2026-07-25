@@ -15,10 +15,12 @@ dependencies = [
     "telethon>=1.42.0",
     "sentence-transformers>=5.2.2",
     "transformers<5.0.0",
+    "asyncpraw>=7.8.0",
+    "yt-dlp>=2025.1.15",
     "torch==2.7.0",
     "torchvision==0.22.0",
     "torchaudio==2.7.0",
-    "google-genai>=1.0.0"
+    "google-genai>=1.0.0",
 ]
 
 
@@ -34,9 +36,12 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+
+[tool.ruff]
+line-length = 120
 
 [tool.ruff.lint.per-file-ignores]
 # Platform config.py files re-export shared constants from core.config so callers

@@ -1,0 +1,37 @@
+.git
+.gitignore
+*.md
+!README.md
+.env
+.env.*
+!.env.example
+
+# The archive itself — tens of GB, and the whole point is that it lives on a volume
+data
+downloads
+logs
+*.db
+*.db-*
+
+# Python
+__pycache__
+*.py[cod]
+.venv
+.ruff_cache
+.pytest_cache
+
+# Reference material and scratch, not needed to run
+reference
+test_vlm_media
+
+# IDE / agents
+.idea
+.vscode
+*.swp
+.claude
+.oc
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
