@@ -42,8 +42,9 @@ def _require_a_channel():
 
 
 def validate_archive():
-    require(TWITTER_AUTH_TOKEN=TWITTER_AUTH_TOKEN, TWITTER_CT0=TWITTER_CT0, TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN)
-    _require_a_channel()
+    """Archiving is independent of Telegram: items are recorded and downloaded either way,
+    and `upload` picks up whatever has a channel whenever one is configured."""
+    require(TWITTER_AUTH_TOKEN=TWITTER_AUTH_TOKEN, TWITTER_CT0=TWITTER_CT0)
 
 
 def validate_upload():
