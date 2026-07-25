@@ -3,6 +3,7 @@ import os
 from social_archiver.core.config import (
     CHECK_INTERVAL_MINUTES,
     DATA_DIR,
+    DOWNLOAD_CONCURRENCY,
     DOWNLOADS_DIR,
     EMBEDDING_ENABLED,
     FETCH_BATCH_SIZE,
@@ -34,18 +35,18 @@ LOG_FILE = LOGS_DIR / "instagram.log"
 
 def _require_a_channel():
     if not (TELEGRAM_CHAT_LIKES or TELEGRAM_CHAT_SAVED or TELEGRAM_CHAT_SHARED):
-        raise ConfigError("Set TELEGRAM_CHAT_LIKES, TELEGRAM_CHAT_SAVED, and/or TELEGRAM_CHAT_SHARED to enable a category")
+        raise ConfigError(
+            "Set TELEGRAM_CHAT_LIKES, TELEGRAM_CHAT_SAVED, and/or TELEGRAM_CHAT_SHARED to enable a category"
+        )
 
 
 def validate_archive():
+    """Archiving is independent of Telegram: items are recorded and downloaded either way,
+    and `upload` picks up whatever has a channel whenever one is configured."""
     require(
         INSTAGRAM_USERNAME=INSTAGRAM_USERNAME,
         INSTAGRAM_PASSWORD=INSTAGRAM_PASSWORD,
-        TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN,
     )
-    if TELEGRAM_CHAT_SHARED:
-        require(INSTAGRAM_DM_USERNAME=INSTAGRAM_DM_USERNAME)
-    _require_a_channel()
 
 
 def validate_upload():

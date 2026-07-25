@@ -1,4 +1,5 @@
 """Instagram's presentation and layout choices, delegated to by the shared jobs."""
+
 from datetime import datetime
 from pathlib import Path
 

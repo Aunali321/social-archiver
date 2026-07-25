@@ -1,33 +1,39 @@
 import asyncio
 import logging
 import traceback
+from collections.abc import Iterator
 
-from instagrapi.exceptions import FeedbackRequired
-
-from social_archiver.core.database import Database
-from social_archiver.core.jobs import ensure_media
+from social_archiver.core.database import ArchiveStatus, Database, Item
+from social_archiver.core.jobs import download_item, download_pending
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.platforms.instagram import config
 from social_archiver.platforms.instagram.client import InstagramClient
 from social_archiver.platforms.instagram.fetchers.likes import LikesFetcher
+from social_archiver.platforms.instagram.fetchers.page import MediaPage
 from social_archiver.platforms.instagram.fetchers.saved import SavedFetcher
 from social_archiver.platforms.instagram.fetchers.shared import SharedFetcher
 from social_archiver.platforms.instagram.port import PLATFORM, InstagramPort
-from social_archiver.platforms.instagram.simple_media import SimpleMedia
 
 logger = logging.getLogger(__name__)
 
-FETCH_ATTEMPTS = 10
-INITIAL_RETRY_DELAY = 180.0
-MAX_RETRY_DELAY = 1800.0
+CATEGORIES = ("likes", "saved", "shared")
+
+# `saved` pages each collection separately, so one stored cursor cannot express where it
+# is; the other two walk a single feed and resume exactly.
+RESUMABLE = frozenset({"likes", "shared"})
 
 
 class ArchiveJob:
-    """Fetches liked/saved/DM-shared posts, records them, and downloads media
-    to disk. Uploading and embedding are separate jobs; rows are committed
-    before any download starts, so an interrupted run resumes where it stopped."""
+    """Fetches liked/saved/DM-shared posts, records them, and downloads media to
+    disk. Uploading and embedding are separate jobs.
 
-    def __init__(self, ig_client: InstagramClient, db: Database, port: InstagramPort, tg: TelegramClient):
+    Each API page is committed and then downloaded before the next page is
+    requested. That keeps a run cut short anywhere — rate limit, crash, Ctrl-C —
+    from losing what it already fetched, and it downloads media while the signed
+    CDN URLs are still fresh: those expire, and a stored URL cannot be renewed
+    without refetching the post."""
+
+    def __init__(self, ig_client: InstagramClient, db: Database, port: InstagramPort, tg: TelegramClient | None = None):
         self.db = db
         self.port = port
         self.tg = tg
@@ -35,66 +41,83 @@ class ArchiveJob:
         self.saved = SavedFetcher(ig_client)
         self.shared = SharedFetcher(ig_client)
 
-    async def run(self, fetch_all: bool = False, category: str | None = None):
-        for name, chat_id in self.port.chats.items():
-            if chat_id and category in (None, name):
+    async def run(self, fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
+        # Backlog first. Those URLs were minted by an earlier run and are the
+        # closest to expiring; anything recorded below downloads inline instead.
+        await download_pending(self.db, self.port, retry_failed)
+
+        failures = []
+        for name in CATEGORIES:
+            if category not in (None, name):
+                continue
+            # DMs are the one category with no listing of its own: it needs to be told
+            # whose thread to walk, so that setting is what enables it.
+            if name == "shared" and not config.INSTAGRAM_DM_USERNAME:
+                continue
+            try:
                 await self._archive_category(name, fetch_all)
-        await self._download_pending()
+            except Exception as e:
+                logger.error(f"Archiving {name} failed: {e}", exc_info=True)
+                if self.tg:
+                    await self.tg.send_error_notification(type(e).__name__, f"archive:{name}", traceback.format_exc())
+                failures.append(e)
+
+        if failures:
+            raise ExceptionGroup("archive failures", failures)
 
     async def _archive_category(self, category: str, fetch_all: bool):
         logger.info(f"Archiving {category} (fetch_all={fetch_all})")
-        delay = INITIAL_RETRY_DELAY
-
-        for attempt in range(1, FETCH_ATTEMPTS + 1):
-            try:
-                await self._record_new_media(category, fetch_all)
-                return
-            except FeedbackRequired as e:
-                if attempt < FETCH_ATTEMPTS:
-                    logger.warning(f"Rate limited (attempt {attempt}/{FETCH_ATTEMPTS}); waiting {delay:.0f}s")
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 1.5, MAX_RETRY_DELAY)
-                    continue
-                await self._notify_and_raise(e, category)
-            except Exception as e:
-                await self._notify_and_raise(e, category)
-
-    async def _notify_and_raise(self, error: Exception, category: str):
-        logger.error(f"Archiving {category} failed: {error}")
-        await self.tg.send_error_notification(type(error).__name__, f"archive:{category}", traceback.format_exc())
-        raise error
-
-    async def _record_new_media(self, category: str, fetch_all: bool):
-        media_list = self._fetch(category, fetch_all)
-        logger.info(f"Fetched {len(media_list)} {category} items")
-
         existing = await self.db.all_ids(PLATFORM)
-        new_media = [media for media in media_list if media.pk not in existing]
-        logger.info(f"Recording {len(new_media)} new items ({len(media_list) - len(new_media)} already archived)")
-        for media in new_media:
-            await self.db.insert(media.to_item(category))
+        # Only a full backfill resumes: a plain run wants the newest items and would
+        # otherwise clobber the backfill's position with a top-of-feed cursor.
+        resumable = fetch_all and category in RESUMABLE
+        start_cursor = await self.db.get_cursor(PLATFORM, category) if resumable else ""
 
-    def _fetch(self, category: str, fetch_all: bool) -> list[SimpleMedia]:
+        recorded = known = downloaded = 0
+        for page in self._fetch(category, fetch_all, start_cursor):
+            pending = []
+            for media in page.media:
+                if media.pk in existing:
+                    known += 1
+                    continue
+                item = media.to_item(category)
+                await self.db.insert(item)
+                existing.add(media.pk)
+                recorded += 1
+                if item.archive_status is ArchiveStatus.PENDING:
+                    pending.append(item)
+
+            if resumable:
+                await self.db.set_cursor(PLATFORM, category, page.next_max_id)
+
+            downloaded += await self._download_page(pending)
+
+            logger.info(f"{category}: {recorded} new, {downloaded} downloaded, {known} already archived")
+
+        if resumable:
+            await self.db.clear_cursor(PLATFORM, category)
+        logger.info(f"Finished {category}: {recorded} new, {downloaded} downloaded, {known} already archived")
+
+    async def _download_page(self, items: list[Item]) -> int:
+        """Download a page's media several at a time. A reel is almost entirely time spent
+        waiting on the network, so one at a time left the link idle: measured at 17 items a
+        minute sequentially. Still per page, so urls are used while their signature is fresh."""
+        semaphore = asyncio.Semaphore(config.DOWNLOAD_CONCURRENCY)
+
+        async def download(item: Item) -> bool:
+            async with semaphore:
+                return await download_item(self.db, self.port, item)
+
+        return sum(await asyncio.gather(*(download(item) for item in items)))
+
+    def _fetch(self, category: str, fetch_all: bool, start_cursor: str = "") -> Iterator[MediaPage]:
         amount = 0 if fetch_all else config.FETCH_BATCH_SIZE
         match category:
             case "likes":
-                return self.likes.fetch_liked_media(amount)
+                return self.likes.fetch_liked_media(amount, start_cursor)
             case "saved":
                 return self.saved.fetch_saved_media(amount)
             case "shared":
-                return self.shared.fetch_shared_media(config.INSTAGRAM_DM_USERNAME, amount)
+                return self.shared.fetch_shared_media(config.INSTAGRAM_DM_USERNAME, amount, start_cursor)
             case _:
                 raise ValueError(f"Unknown category: {category}")
-
-    async def _download_pending(self):
-        pending = await self.db.pending_archive(PLATFORM)
-        if not pending:
-            return
-
-        logger.info(f"Downloading media for {len(pending)} items")
-        for item in pending:
-            try:
-                await ensure_media(self.db, self.port, item)
-            except Exception as e:
-                logger.error(f"Download failed for {item.item_id}: {e}")
-                await self.db.mark_archive_failed(item.item_id, str(e))

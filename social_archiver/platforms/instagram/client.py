@@ -13,6 +13,11 @@ class InstagramClient:
         self.client = Client()
         self.client.delay_range = config.INSTAGRAM_DELAY_RANGE
         self._authenticated = False
+        self.request_count = 0  # every private API request, for honest cost logging
+
+    def private_request(self, endpoint: str, params: dict | None = None) -> dict:
+        self.request_count += 1
+        return self.client.private_request(endpoint, params=params)
 
     def login(self):
         if config.SESSION_PATH.exists():

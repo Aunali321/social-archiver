@@ -24,12 +24,13 @@ PORT = InstagramPort()
 MILVUS_COLLECTIONS = {"likes": "instagram_likes", "saved": "instagram_saved", "shared": "instagram_shared"}
 
 
-async def archive(fetch_all: bool = False, category: str | None = None):
+async def archive(fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
     config.validate_archive()
     ig_client = InstagramClient()
     ig_client.login()
     async with Database(config.DATABASE_PATH) as db:
-        await ArchiveJob(ig_client, db, PORT, TelegramClient()).run(fetch_all, category)
+        tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
+        await ArchiveJob(ig_client, db, PORT, tg).run(fetch_all, category, retry_failed)
 
 
 async def upload(retry_failed: bool = False):
@@ -68,7 +69,7 @@ def main():
 
     match args.command:
         case "archive":
-            asyncio.run(archive(args.history, args.category))
+            asyncio.run(archive(args.history, args.category, args.retry_failed))
         case "upload":
             asyncio.run(upload(args.retry_failed))
         case "embed":

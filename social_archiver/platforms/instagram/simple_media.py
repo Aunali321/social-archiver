@@ -1,4 +1,5 @@
 """Forgiving media types for the Instagram archiver — more lenient than instagrapi's strict Pydantic models."""
+
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -29,6 +30,7 @@ class SimpleUser:
 @dataclass
 class SimpleResource:
     """One item of a carousel/album."""
+
     pk: str
     media_type: int  # 1=photo, 2=video
     video_url: str | None = None
@@ -68,6 +70,7 @@ class SimpleMedia:
     product_type: str = "feed"  # feed, clips, igtv, etc.
     collection_name: str | None = None  # for saved posts
     shared_by_username: str | None = None  # for DM shared posts
+    link_url: str | None = None  # where a share points when the post itself is unreachable
 
     @classmethod
     def from_dict(cls, data: dict) -> "SimpleMedia":
@@ -206,6 +209,7 @@ class SimpleMedia:
             media_urls=self.media_urls,
             collection_name=self.collection_name,
             shared_by_username=self.shared_by_username,
+            link_url=self.link_url,
             product_type=self.product_type,
             archive_status=archive_status,
             upload_status=stage_status,
