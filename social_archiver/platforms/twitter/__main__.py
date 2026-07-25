@@ -59,7 +59,11 @@ async def embed(retry_failed: bool = False):
 
 
 async def run_all(fetch_all: bool = False):
-    jobs = {"archive": lambda: archive(fetch_all), "upload": upload}
+    jobs = {"archive": lambda: archive(fetch_all)}
+    # Uploading and embedding are opt-in: without a bot token or an embedding server
+    # there is nothing for them to do, and archiving does not depend on either.
+    if config.TELEGRAM_BOT_TOKEN:
+        jobs["upload"] = upload
     if config.EMBEDDING_ENABLED:
         jobs["embed"] = embed
     await run_jobs(jobs)
@@ -81,7 +85,6 @@ def main():
             asyncio.run(run_all(args.history))
         case "daemon":
             config.validate_archive()
-            config.validate_upload()
             DaemonScheduler(run_all, config.CHECK_INTERVAL_MINUTES).run_daemon()
 
 
