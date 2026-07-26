@@ -67,7 +67,6 @@ LOGS_DIR = Path(os.getenv("LOGS_DIR") or BASE_DIR / "logs")
 # Retry
 MAX_DOWNLOAD_RETRIES = 3
 RETRY_BACKOFF_BASE = 30  # seconds
-MAX_ARCHIVE_ATTEMPTS = 3  # per item, across runs; --retry-failed clears the count
 # Video downloads are mostly yt-dlp waiting on the network, with a short ffmpeg mux at the
 # end, so several at once cost little CPU. Kept low to share the machine.
 DOWNLOAD_CONCURRENCY = int(os.getenv("DOWNLOAD_CONCURRENCY", "4"))

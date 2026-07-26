@@ -375,17 +375,15 @@ class Database:
         cursor = await self._connection.execute(query, tuple(params))
         return [Item.from_row(row) for row in await cursor.fetchall()]
 
-    async def pending_archive(self, platform: str, max_attempts: int) -> list[Item]:
-        """Never-tried items plus previously-failed ones still under the attempt cap.
-        Items that exhaust the cap stay 'failed' until --retry-failed clears the count."""
+    async def pending_archive(self, platform: str, include_failed: bool) -> list[Item]:
+        statuses = "('pending', 'failed')" if include_failed else "('pending')"
         return await self._select_items(
-            """
+            f"""
             SELECT * FROM items
-            WHERE platform = ?
-              AND (archive_status = 'pending' OR (archive_status = 'failed' AND archive_attempts < ?))
+            WHERE platform = ? AND archive_status IN {statuses}
             ORDER BY fetched_at
             """,
-            (platform, max_attempts),
+            (platform,),
         )
 
     async def _pending_stage(self, stage: str, platform: str, category: str, include_failed: bool) -> list[Item]:
@@ -515,14 +513,6 @@ class Database:
         )
         await self._connection.commit()
         return cursor.rowcount > 0
-
-    async def reset_archive_failures(self, platform: str) -> int:
-        cursor = await self._connection.execute(
-            "UPDATE items SET archive_attempts = 0 WHERE platform = ? AND archive_status = 'failed'",
-            (platform,),
-        )
-        await self._connection.commit()
-        return cursor.rowcount
 
     async def mark_uploaded(self, item_id: str, message_ids: list[int]):
         await self._connection.execute(

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, TypeVar
@@ -13,8 +14,18 @@ T = TypeVar("T")
 
 _KNOWN_EXTENSIONS = frozenset({".mp4", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"})
 
-# HTTP statuses that won't recover on retry (dead/removed/forbidden media).
-_PERMANENT_STATUS = frozenset({400, 401, 403, 404, 410})
+_TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
+
+_YT_DLP_STATUS = re.compile(r"HTTP Error (\d{3})")
+
+
+class ExtractorError(RuntimeError):
+    """yt-dlp exits 1 for every failure, so the status it hit exists only in its stderr."""
+
+    def __init__(self, url: str, detail: str):
+        detail = detail.strip()
+        self.status = int(match.group(1)) if (match := _YT_DLP_STATUS.search(detail)) else None
+        super().__init__(f"yt-dlp failed for {url}: {detail[-500:]}")
 
 
 def url_extension(url: str) -> str:
@@ -76,10 +87,10 @@ async def fetch_stream(url: str, folder: Path, stem: str) -> Path:
     )
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed for {url}: {stderr.decode().strip()[-500:]}")
+        raise ExtractorError(url, stderr.decode())
     produced = [line.strip() for line in stdout.decode().splitlines() if line.strip()]
     if not produced:
-        raise RuntimeError(f"yt-dlp produced no output file for {url}")
+        raise ExtractorError(url, "produced no output file")
     return Path(produced[-1])
 
 
@@ -89,6 +100,14 @@ async def fetch_url(url: str, path: Path, timeout: float = 60.0) -> None:
         response.raise_for_status()
         path.write_bytes(response.content)
         logger.debug(f"Downloaded {url} -> {path}")
+
+
+def is_transient(error: Exception) -> bool:
+    if isinstance(error, ExtractorError):
+        return error.status in _TRANSIENT_STATUS
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in _TRANSIENT_STATUS
+    return isinstance(error, httpx.TransportError)
 
 
 async def download_with_retry(
@@ -101,9 +120,7 @@ async def download_with_retry(
         try:
             return await download_fn()
         except Exception as e:
-            # Permanent failures (dead links) won't recover; don't waste the backoff on them
-            permanent = isinstance(e, httpx.HTTPStatusError) and e.response.status_code in _PERMANENT_STATUS
-            if permanent or attempt == max_retries:
+            if attempt == max_retries or not is_transient(e):
                 logger.error(f"Failed to download {item_label} after {attempt} attempt(s): {e}")
                 raise
             backoff = backoff_base * (2 ** (attempt - 1))
