@@ -168,8 +168,10 @@ class TweetExpander:
 
     def _pending_pairs(self) -> tuple[list[tuple[str, str]], dict[str, str]]:
         """(author, conversation) pairs to search; protected-author conversations
-        go straight to the TweetDetail fallback (search can't see them)."""
-        pairs: list[tuple[str, str]] = []
+        go straight to the TweetDetail fallback (search can't see them). Liking several
+        tweets in one thread yields one pair per tweet, and they all produce the same
+        query term, so a repeat only costs room in the batched request."""
+        pairs: set[tuple[str, str]] = set()
         fallback: dict[str, str] = {}  # conversation_id -> focal tweet id
 
         for tid in self._archived:
@@ -186,9 +188,9 @@ class TweetExpander:
                 continue
             pair = (author, conv)
             if pair not in self._searched_pairs:
-                pairs.append(pair)
+                pairs.add(pair)
 
-        return pairs, fallback
+        return sorted(pairs), fallback
 
     async def _discover_threads(self) -> bool:
         pairs, fallback_convs = self._pending_pairs()
