@@ -10,9 +10,12 @@ import asyncio
 import importlib
 import logging
 import traceback
+from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 from social_archiver.core import config
-from social_archiver.core.queue import Job, JobQueue
+from social_archiver.core.queue import Job, JobQueue, Schedule
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +26,10 @@ JOB_FLAGS = {
     "archive": ("category", "history", "retry_failed"),
     "upload": ("retry_failed",),
     "embed": ("retry_failed",),
-    "run": ("history",),
 }
 
 POLL_SECONDS = 2
+SCHEDULE_POLL_SECONDS = 30
 
 
 def categories(platform: str) -> list[str]:
@@ -35,10 +38,29 @@ def categories(platform: str) -> list[str]:
     return [getattr(c, "name", c) for c in archiver.CATEGORIES]
 
 
+def next_run() -> datetime:
+    return datetime.now() + timedelta(minutes=config.CHECK_INTERVAL_MINUTES)
+
+
+async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> list[Job]:
+    """Separate rows rather than one bundled run, so a category the API is refusing fails on its
+    own instead of marking the whole cycle failed."""
+    plan: list[tuple[str, str | None]] = [("archive", category) for category in schedule.categories]
+    if config.TELEGRAM_BOT_TOKEN:
+        plan.append(("upload", None))
+    if config.EMBEDDING_ENABLED:
+        plan.append(("embed", None))
+
+    queued = []
+    for job, category in plan:
+        if enqueued := await queue.enqueue(schedule.platform, job, category=category, source=source):
+            queued.append(enqueued)
+    return queued
+
+
 async def _invoke(job: Job):
     entry = importlib.import_module(f"social_archiver.platforms.{job.platform}.__main__")
-    # `run` is run_all in the module; the CLI name is what the queue stores
-    target = getattr(entry, "run_all" if job.job == "run" else job.job)
+    target = getattr(entry, job.job)
     flags = JOB_FLAGS[job.job]
     kwargs: dict[str, object] = {}
     if "history" in flags:
@@ -68,21 +90,59 @@ async def worker(queue: JobQueue, platform: str):
             await queue.finish(job.id)
 
 
-async def scheduler(queue: JobQueue):
-    """Enqueues a full cycle per platform on the interval. Nothing runs at startup: a
-    restart is not a reason to hit a rate-limited API, and RUN_ON_START overrides that."""
-    interval = config.CHECK_INTERVAL_MINUTES * 60
+async def seed_schedules(queue: JobQueue):
+    """Runs before anything can read a schedule, so nothing sees a platform that has no row yet."""
+    for platform in PLATFORMS:
+        await queue.ensure_schedule(platform, categories(platform), next_run())
+
+
+async def scheduler(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
+    """Queues a cycle for each platform this process serves, when its schedule falls due.
+
+    The schedule is read every tick rather than held here, so a change takes effect without a
+    restart. Nothing runs at startup: a restart is not a reason to hit a rate-limited API."""
+
+    async def mine() -> list[Schedule]:
+        return [s for s in await queue.schedules() if s.platform in platforms]
 
     if config.RUN_ON_START:
-        for platform in PLATFORMS:
-            await queue.enqueue(platform, "run", source="startup")
-        logger.info("RUN_ON_START set, queued a cycle for every platform")
+        for schedule in await mine():
+            if schedule.enabled:
+                await enqueue_cycle(queue, schedule, source="startup")
+        logger.info("RUN_ON_START set, queued a cycle for every scheduled platform")
 
-    logger.info(f"Scheduler idle; queueing a cycle for every platform every {config.CHECK_INTERVAL_MINUTES} minutes")
+    logger.info(
+        f"Scheduler idle for {', '.join(platforms)}; "
+        f"a due platform queues a cycle, every {config.CHECK_INTERVAL_MINUTES} minutes"
+    )
     while True:
-        await asyncio.sleep(interval)
-        for platform in PLATFORMS:
-            if await queue.enqueue(platform, "run", source="schedule"):
-                logger.info(f"Queued scheduled run for {platform}")
-            else:
-                logger.info(f"Skipped scheduled run for {platform}: one is already queued or running")
+        await asyncio.sleep(SCHEDULE_POLL_SECONDS)
+        try:
+            now = datetime.now()
+            for schedule in await mine():
+                if not schedule.due(now):
+                    continue
+                # Reschedule first: a failure below costs one cycle, not an immediate retry loop.
+                await queue.set_schedule(schedule.platform, True, schedule.categories, next_run())
+                queued = await enqueue_cycle(queue, schedule, source="schedule")
+                logger.info(f"Queued {len(queued)} job(s) for the {schedule.platform} cycle")
+        except Exception:
+            logger.exception("Scheduler tick failed; retrying next tick")
+
+
+@asynccontextmanager
+async def running(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
+    """The queue, one worker per platform served, and the scheduler.
+
+    A platform must be served by exactly one process: two workers on the same platform would
+    archive it twice at once. Splitting platforms across processes is fine, overlapping is not."""
+    await queue.connect()
+    await seed_schedules(queue)
+    tasks = [asyncio.create_task(worker(queue, platform)) for platform in platforms]
+    tasks.append(asyncio.create_task(scheduler(queue, platforms)))
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await queue.close()

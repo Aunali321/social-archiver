@@ -1,8 +1,7 @@
-"""Durable job queue shared by the scheduler and the web UI.
+"""Durable job queue and schedule, shared by the scheduler and the web UI.
 
-Jobs are rows, not in-memory state: a restart loses nothing, a run that dies is visible
-rather than silently gone, and nothing can run the same platform twice at once because a
-single worker drains each platform's queue in order.
+Jobs and schedules are rows, not in-memory state: a restart loses nothing, a run that dies is
+visible rather than silently gone, and a paused platform stays paused.
 """
 
 import json
@@ -64,6 +63,26 @@ class Job:
         return " ".join(parts)
 
 
+@dataclass(slots=True)
+class Schedule:
+    platform: str
+    enabled: bool
+    categories: list[str]
+    next_run: datetime
+
+    @classmethod
+    def from_row(cls, row: aiosqlite.Row) -> "Schedule":
+        return cls(
+            platform=row["platform"],
+            enabled=bool(row["enabled"]),
+            categories=json.loads(row["categories"]),
+            next_run=datetime.fromisoformat(row["next_run"]),
+        )
+
+    def due(self, now: datetime) -> bool:
+        return self.enabled and self.next_run <= now
+
+
 class JobQueue:
     """One queue for every platform, in its own database so it is independent of the
     per-platform archives it drives."""
@@ -93,6 +112,13 @@ class JobQueue:
                 error TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(platform, status, id);
+
+            CREATE TABLE IF NOT EXISTS schedules (
+                platform TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                categories TEXT NOT NULL,
+                next_run TIMESTAMP NOT NULL
+            );
         """)
         await self._connection.commit()
         await self._release_orphans()
@@ -123,8 +149,8 @@ class JobQueue:
         """Returns None when an identical job is already waiting: a scheduler tick that
         lands while the queue is backed up should not stack duplicates."""
         duplicate = await self._connection.execute(
-            "SELECT 1 FROM jobs WHERE platform = ? AND job = ? AND status IN (?, ?)",
-            (platform, job, JobStatus.QUEUED, JobStatus.RUNNING),
+            "SELECT 1 FROM jobs WHERE platform = ? AND job = ? AND category IS ? AND status IN (?, ?)",
+            (platform, job, category, JobStatus.QUEUED, JobStatus.RUNNING),
         )
         if await duplicate.fetchone():
             return None
@@ -140,20 +166,19 @@ class JobQueue:
         return await self.get(cursor.lastrowid)
 
     async def claim(self, platform: str) -> Job | None:
-        """Take the oldest queued job for a platform and mark it running."""
+        """Take the oldest queued job for a platform and mark it running. One statement, so two
+        workers can never claim the same row."""
         cursor = await self._connection.execute(
-            "SELECT * FROM jobs WHERE platform = ? AND status = ? ORDER BY id LIMIT 1",
-            (platform, JobStatus.QUEUED),
+            """
+            UPDATE jobs SET status = ?, started_at = ?
+            WHERE id = (SELECT id FROM jobs WHERE platform = ? AND status = ? ORDER BY id LIMIT 1)
+            RETURNING id
+            """,
+            (JobStatus.RUNNING, datetime.now().isoformat(), platform, JobStatus.QUEUED),
         )
         row = await cursor.fetchone()
-        if not row:
-            return None
-        await self._connection.execute(
-            "UPDATE jobs SET status = ?, started_at = ? WHERE id = ?",
-            (JobStatus.RUNNING, datetime.now().isoformat(), row["id"]),
-        )
         await self._connection.commit()
-        return await self.get(row["id"])
+        return await self.get(row["id"]) if row else None
 
     async def finish(self, job_id: int, error: str | None = None):
         await self._connection.execute(
@@ -189,6 +214,26 @@ class JobQueue:
         )
         return [Job.from_row(row) for row in await cursor.fetchall()]
 
+    async def ensure_schedule(self, platform: str, categories: list[str], next_run: datetime):
+        await self._connection.execute(
+            "INSERT OR IGNORE INTO schedules (platform, enabled, categories, next_run) VALUES (?, 1, ?, ?)",
+            (platform, json.dumps(categories), next_run.isoformat()),
+        )
+        await self._connection.commit()
 
-def to_json(job: Job) -> str:
-    return json.dumps({"id": job.id, "platform": job.platform, "job": job.job, "status": str(job.status)})
+    async def schedules(self) -> list[Schedule]:
+        cursor = await self._connection.execute("SELECT * FROM schedules ORDER BY platform")
+        return [Schedule.from_row(row) for row in await cursor.fetchall()]
+
+    async def schedule(self, platform: str) -> Schedule | None:
+        cursor = await self._connection.execute("SELECT * FROM schedules WHERE platform = ?", (platform,))
+        row = await cursor.fetchone()
+        return Schedule.from_row(row) if row else None
+
+    async def set_schedule(self, platform: str, enabled: bool, categories: list[str], next_run: datetime) -> bool:
+        cursor = await self._connection.execute(
+            "UPDATE schedules SET enabled = ?, categories = ?, next_run = ? WHERE platform = ?",
+            (int(enabled), json.dumps(categories), next_run.isoformat(), platform),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
