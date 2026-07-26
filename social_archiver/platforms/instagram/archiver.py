@@ -20,7 +20,7 @@ CATEGORIES = ("likes", "saved", "shared")
 
 # `saved` pages each collection separately, so one stored cursor cannot express where it
 # is; the other two walk a single feed and resume exactly.
-RESUMABLE = frozenset({"likes", "shared"})
+RESUMABLE = frozenset({"likes", "saved", "shared"})
 
 
 class ArchiveJob:
@@ -93,7 +93,7 @@ class ArchiveJob:
                     pending.append(item)
 
             if resumable:
-                await self.db.set_cursor(PLATFORM, category, page.next_max_id)
+                await self.db.set_cursor(PLATFORM, category, page.cursor)
 
             downloaded += await self._download_page(pending)
 
@@ -121,7 +121,7 @@ class ArchiveJob:
             case "likes":
                 return self.likes.fetch_liked_media(amount, start_cursor)
             case "saved":
-                return self.saved.fetch_saved_media(amount)
+                return self.saved.fetch_saved_media(amount, start_cursor)
             case "shared":
                 return self.shared.fetch_shared_media(config.INSTAGRAM_DM_USERNAME, amount, start_cursor)
             case _:

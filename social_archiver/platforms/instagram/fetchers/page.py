@@ -14,7 +14,14 @@ class MediaPage:
     media: list[SimpleMedia]
     next_max_id: str
     raw_count: int
+    resume_from: str | None = None
 
     @property
     def has_more(self) -> bool:
         return bool(self.next_max_id) and self.raw_count > 0
+
+    @property
+    def cursor(self) -> str:
+        """What to store to resume the walk after this page. One feed resumes from its
+        own max_id; a walk spanning several feeds has to say which one it is in."""
+        return self.next_max_id if self.resume_from is None else self.resume_from
