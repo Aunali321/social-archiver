@@ -13,6 +13,7 @@ from social_archiver.platforms.twitter.client import TwitterClient
 from social_archiver.platforms.twitter.expander import TweetExpander
 from social_archiver.platforms.twitter.fetchers.export import parse_like_export
 from social_archiver.platforms.twitter.port import PLATFORM, TwitterPort
+from social_archiver.platforms.twitter.simple_tweet import SimpleTweet
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,9 @@ class ArchiveJob:
         # Backlog first. Those URLs were minted by an earlier run and are the closest to expiring.
         await download_pending(self.db, self.port, retry_failed)
 
+        if retry_failed:
+            await self._resolve_tombstones()
+
         failures = []
         for cat in CATEGORIES:
             if category not in (None, cat.name):
@@ -63,6 +67,35 @@ class ArchiveJob:
 
         if failures:
             raise ExceptionGroup("archive failures", failures)
+
+    async def _resolve_tombstones(self):
+        """Look the tombstoned tweets up again.
+
+        A tombstone records that this account, on this connection, was refused a tweet. That is
+        not the same as the tweet being gone: withholding is per-country, so a tweet invisible
+        from one exit resolves normally from another. One request per 100 ids is cheap enough to
+        spend on finding out."""
+        tombstoned = await self.db.tombstoned(PLATFORM)
+        if not tombstoned:
+            return
+
+        by_id = {item.item_id: item for item in tombstoned}
+        logger.info(f"Re-resolving {len(by_id)} tombstoned tweets")
+        result = await self.tw_client.get_tweets_by_ids(list(by_id), page_delay=PAGE_DELAY)
+
+        recovered = 0
+        for raw in result.tweets:
+            tweet = SimpleTweet.from_api_dict(raw)
+            if tweet.id in by_id and await self.db.replace_tombstone(tweet.to_item(by_id[tweet.id].category)):
+                recovered += 1
+                logger.info(f"Recovered {tweet.id} from @{tweet.author_username}")
+
+        # A tweet still refused may at least say why now, which the old generic text never did.
+        for item_id, reason in result.unavailable.items():
+            if item_id in by_id and reason != by_id[item_id].text:
+                await self.db.set_tombstone_reason(item_id, reason)
+
+        logger.info(f"Recovered {recovered} of {len(by_id)} tombstoned tweets")
 
     async def _archive_category(self, category: Category, fetch_all: bool):
         logger.info(f"Archiving {category.name} (fetch_all={fetch_all})")

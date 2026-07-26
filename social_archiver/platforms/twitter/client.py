@@ -167,6 +167,9 @@ class BatchLookupResult:
 
     tweets: list[dict[str, Any]] = field(default_factory=list)
     missing: set[str] = field(default_factory=set)  # requested but not returned (deleted/protected/suspended)
+    # Why a missing id was refused, verbatim from the API. Withholding is per-country, so this
+    # is the difference between a tweet that is gone and one this connection may not see.
+    unavailable: dict[str, str] = field(default_factory=dict)  # tweet_id -> reason
 
 
 class TwitterClient:
@@ -459,8 +462,8 @@ class TwitterClient:
     async def get_tweets_by_ids(
         self, tweet_ids: list[str], chunk_size: int = 100, page_delay: float = 1.5
     ) -> BatchLookupResult:
-        """Resolve up to chunk_size tweets per request. Missing IDs (deleted,
-        protected, suspended) are reported in `missing` — no reason text available."""
+        """Resolve up to chunk_size tweets per request. IDs the API refuses are reported in
+        `missing`, with whatever reason it gave in `unavailable`."""
         result = BatchLookupResult()
         requested = list(dict.fromkeys(tweet_ids))
 
@@ -487,12 +490,20 @@ class TwitterClient:
             if not success:
                 raise RuntimeError(f"TweetResultsByRestIds failed for {len(chunk)} ids: {error}")
 
+            entries = data.get("data", {}).get("tweetResult") or []
+            # A refused entry carries no rest_id, so its id survives only in the request order.
+            # Trust that alignment only when the API returned exactly one entry per id asked.
+            aligned = len(entries) == len(chunk)
+
             returned_ids = set()
-            for item in data.get("data", {}).get("tweetResult") or []:
-                mapped = _map_tweet_result(item.get("result")) if isinstance(item, dict) else None
-                if mapped:
+            for index, item in enumerate(entries):
+                raw = item.get("result") if isinstance(item, dict) else None
+                if mapped := _map_tweet_result(raw):
                     returned_ids.add(mapped["id"])
                     result.tweets.append(mapped)
+                elif aligned and (reason := _unavailable_reason(raw)):
+                    result.unavailable[chunk[index]] = reason
+
             result.missing.update(tid for tid in chunk if tid not in returned_ids)
 
         return result
@@ -875,6 +886,19 @@ def _extract_media(result: dict | None) -> list[dict[str, Any]]:
         media.append(media_item)
 
     return media
+
+
+def _unavailable_reason(result: dict | None) -> str | None:
+    """Whatever the API says about a tweet it would not return, kept verbatim rather than
+    classified: the reason strings are undocumented and change, and guessing at them is how a
+    withheld tweet ends up recorded as deleted."""
+    if not isinstance(result, dict):
+        return None
+    reason = result.get("reason") or result.get("tombstone", {}).get("text", {}).get("text")
+    typename = result.get("__typename")
+    if reason and typename and typename != "Tweet":
+        return f"{typename}: {reason}"
+    return reason or (typename if typename and typename != "Tweet" else None)
 
 
 def _map_tweet_result(result: dict | None) -> dict[str, Any] | None:

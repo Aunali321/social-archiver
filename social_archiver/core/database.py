@@ -433,6 +433,36 @@ class Database:
             (platform,),
         )
 
+    async def tombstoned(self, platform: str) -> list[Item]:
+        return await self._select_items(
+            "SELECT * FROM items WHERE platform = ? AND archive_status = 'tombstone' ORDER BY fetched_at",
+            (platform,),
+        )
+
+    async def replace_tombstone(self, item: Item) -> bool:
+        """A tombstone that resolves on a later attempt becomes the real thing.
+
+        Guarded on the status so a placeholder can be filled in but a genuinely archived item is
+        never overwritten by a thinner copy. How the item was found is kept: that came from the
+        run that discovered it, not from this lookup."""
+        preserved = {"item_id", "platform", "category", "origin", "discovered_via_item_id", "fetched_at"}
+        columns = [c for c in _ITEM_COLUMNS if c not in preserved]
+        assignments = ", ".join(f"{c} = ?" for c in columns)
+        cursor = await self._connection.execute(
+            f"UPDATE items SET {assignments} WHERE item_id = ? AND archive_status = 'tombstone'",
+            [_to_column(item, name) for name in columns] + [item.item_id],
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
+    async def set_tombstone_reason(self, item_id: str, reason: str) -> bool:
+        cursor = await self._connection.execute(
+            "UPDATE items SET text = ? WHERE item_id = ? AND archive_status = 'tombstone'",
+            (reason, item_id),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
     async def mark_archived(self, item_id: str, local_paths: list[Path]):
         await self._connection.execute(
             """

@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 10
 
-TOMBSTONE_REASON_BATCH = "unavailable (deleted, protected, or suspended account)"
+# The API returns a bare null for a tweet it will not serve, whether it was deleted or is
+# withheld from this connection's country. Protected and suspended arrive with a stated reason;
+# these do not, so the text says what is known rather than picking a cause.
+TOMBSTONE_REASON_BATCH = "unavailable, no reason given (deleted, or withheld from this connection)"
 
 
 def datetime_min() -> datetime:
@@ -152,8 +155,9 @@ class TweetExpander:
                 self._tweets[tid].pop("shallow", None)
                 logger.info(f"Tweet {tid} vanished after being embedded; keeping quote-card stub")
             elif tid in refs:
-                self._tombstones.setdefault(tid, TOMBSTONE_REASON_BATCH)
-                logger.info(f"Tweet {tid} unavailable, recording tombstone")
+                reason = result.unavailable.get(tid, TOMBSTONE_REASON_BATCH)
+                self._tombstones.setdefault(tid, reason)
+                logger.info(f"Tweet {tid} unavailable ({reason}), recording tombstone")
 
         self._archived.update(refs)
         return True
