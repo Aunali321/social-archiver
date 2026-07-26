@@ -7,7 +7,6 @@ from social_archiver.core.config import ConfigError
 from social_archiver.core.database import Database
 from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
 from social_archiver.core.milvus_manager import MilvusManager
-from social_archiver.core.scheduler import DaemonScheduler
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.core.utils import setup_logging
 from social_archiver.llm.factory import create_vlm_client
@@ -88,9 +87,6 @@ def main():
             asyncio.run(embed(args.retry_failed))
         case "run":
             asyncio.run(run_all(args.history))
-        case "daemon":
-            config.validate_archive()
-            DaemonScheduler(run_all, config.CHECK_INTERVAL_MINUTES).run_daemon()
 
 
 if __name__ == "__main__":

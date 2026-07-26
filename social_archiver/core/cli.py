@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 
 def build_parser(description: str, categories: Sequence[str]) -> argparse.ArgumentParser:
-    """The shared archive/upload/embed/run/daemon command line every platform exposes."""
+    """The shared archive/upload/embed/run command line every platform exposes."""
     parser = argparse.ArgumentParser(description=description)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -22,7 +22,5 @@ def build_parser(description: str, categories: Sequence[str]) -> argparse.Argume
 
     run = commands.add_parser("run", help="Run archive, upload, and embed once, in order")
     run.add_argument("--history", action="store_true", help="Fetch the full history, not just new items")
-
-    commands.add_parser("daemon", help="Run all jobs now, then again on an interval")
 
     return parser
