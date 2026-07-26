@@ -17,7 +17,7 @@ affecting the others:
 | `archive` | Fetch new content, download media to disk | platform credentials |
 | `upload` | Send archived items to Telegram | bot token + channel ids |
 | `embed` | Index for semantic search | an embedding server |
-| `run` / `daemon` | All of the above, once / on an interval | |
+| `run` | All of the above, once, in order | |
 
 Archiving never depends on Telegram or embeddings — run it alone and the rest can catch up
 later. Failed items are retried with `--retry-failed`.
@@ -115,8 +115,34 @@ interrupted rather than vanishing. The UI shows the queue, recent runs and their
 It has no authentication and can start jobs, so keep it on the LAN.
 
 ```bash
-uv run python -m social_archiver.web    # WEB_HOST / WEB_PORT to change where it binds
+uv run python -m social_archiver.web                        # UI + scheduler + workers
+uv run python -m social_archiver.daemon                     # the same, without the UI
+uv run python -m social_archiver.daemon --platform reddit   # only this platform, repeatable
 ```
+
+A platform must be served by exactly one process. Splitting platforms across daemons is fine;
+running two that both cover a platform is not, since each starts its own worker.
+
+### The schedule
+
+Each platform has a schedule row in `data/jobs.db`: whether the timer fires, and which
+categories it archives when it does. It is state, not a process, so pausing survives a restart
+and the timer does not reset when the container does.
+
+Set it from the UI, or directly for a headless deployment:
+
+```sql
+-- archive saved and shared on the timer, leave likes alone
+UPDATE schedules SET categories = '["saved","shared"]' WHERE platform = 'instagram';
+UPDATE schedules SET enabled = 0 WHERE platform = 'instagram';   -- pause entirely
+```
+
+A cycle queues one `archive` job per scheduled category, then `upload` and `embed` if they are
+configured. Separate jobs rather than one bundled run, so a category the API is refusing fails
+on its own instead of marking the whole cycle failed and hiding the categories that worked.
+
+That matters when a platform soft-blocks one endpoint: unscheduling that category stops the
+timer walking into the block every cycle, which is what keeps such blocks alive.
 
 ## Usage
 
@@ -129,9 +155,8 @@ uv run python -m social_archiver.platforms.twitter upload --retry-failed
 # Full history rather than only what is new
 uv run python -m social_archiver.platforms.reddit archive --history
 
-# Everything in order, once / forever
+# Everything in order, once
 uv run python -m social_archiver.platforms.twitter run
-uv run python -m social_archiver.platforms.twitter daemon
 ```
 
 Search the archive:
@@ -158,20 +183,30 @@ holding `data/`, `downloads/` and `logs/`; leave it unset to use the compose fil
 directory.
 
 ```bash
-docker compose up -d                                                # all three daemons
-docker compose --profile history run --rm reddit-archiver-history   # one-time full backfill
+docker compose up -d          # one service: web UI, scheduler, one worker per platform
+```
+
+One-off runs go through the UI, or the container shell for the CLI:
+
+```bash
+docker exec social-archiver python -m social_archiver.platforms.reddit archive --history
 ```
 
 `downloads/` is the archive itself and is mounted as a volume — with `CLEANUP_DOWNLOADS=false`
 nothing is ever deleted, so it must not live in the container's writable layer.
 
+`/etc/localtime` is mounted read-only so times in the UI and the logs are the server's rather
+than UTC. Set `TZ` in `.env` to run on a different zone.
+
 ## Layout
 
 ```
 social_archiver/
-├── core/         database, jobs, milvus, telegram, downloader, scheduler, cli
+├── core/         database, jobs, queue, worker, milvus, telegram, downloader, cli
 ├── llm/          VLM clients (vertex/gemini/openrouter), embed + rerank HTTP clients
-└── platforms/    instagram/ reddit/ twitter/ — archiver, embedder, port, fetchers, __main__
+├── platforms/    instagram/ reddit/ twitter/ — archiver, embedder, port, fetchers, __main__
+├── web/          status, schedule and queue UI
+└── daemon.py     the same scheduler and workers without the UI
 
 data/             sqlite + milvus lite + session + exports   (gitignored)
 downloads/        the archived media                          (gitignored)
