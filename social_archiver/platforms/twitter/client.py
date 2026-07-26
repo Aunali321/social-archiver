@@ -37,6 +37,12 @@ QUERY_IDS = {
     "HomeLatestTimeline": "iOEZpOdfekFsxSlPQCQtPg",
 }
 
+# A dropped connection or a 5xx is the transport failing rather than the request being wrong,
+# so it is worth repeating. Anything the server actually answered is not.
+TRANSIENT_STATUS = {500, 502, 503, 504}
+MAX_REQUEST_ATTEMPTS = 3
+REQUEST_BACKOFF_BASE = 2  # seconds, doubled per attempt
+
 # Fallback query IDs to try when primary ones get 404
 FALLBACK_QUERY_IDS = {
     "Bookmarks": ["tmd4ifV8RHltzn8ymGg1aw"],
@@ -237,36 +243,43 @@ class TwitterClient:
         url = f"{config.TWITTER_API_BASE}/{query_id}/{operation}?{urlencode(params)}"
 
         client = await self._get_client()
-        try:
-            self.request_count += 1
-            response = await client.get(url, headers=self._get_headers())
-
-            if response.status_code == 429 and await self._wait_for_rate_limit(response):
+        for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+            try:
                 self.request_count += 1
                 response = await client.get(url, headers=self._get_headers())
 
-            if response.status_code == 404:
-                return False, None, f"HTTP 404 (query_id={query_id})"
-            if response.status_code == 429:
-                return False, None, "Rate limited (429)"
-            if response.status_code != 200:
-                return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
+                if response.status_code == 429 and await self._wait_for_rate_limit(response):
+                    self.request_count += 1
+                    response = await client.get(url, headers=self._get_headers())
 
-            data = response.json()
-
-            if data.get("errors"):
-                error_msg = ", ".join(e.get("message", "") for e in data["errors"])
-                if data.get("data"):
-                    logger.warning(f"GraphQL errors (non-fatal): {error_msg}")
+                if response.status_code == 404:
+                    return False, None, f"HTTP 404 (query_id={query_id})"
+                if response.status_code == 429:
+                    return False, None, "Rate limited (429)"
+                if response.status_code in TRANSIENT_STATUS:
+                    transient = f"HTTP {response.status_code}"
+                elif response.status_code != 200:
+                    return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
                 else:
-                    return False, None, error_msg
+                    data = response.json()
+                    if data.get("errors"):
+                        error_msg = ", ".join(e.get("message", "") for e in data["errors"])
+                        if data.get("data"):
+                            logger.warning(f"GraphQL errors (non-fatal): {error_msg}")
+                        else:
+                            return False, None, error_msg
+                    return True, data, None
 
-            return True, data, None
+            except httpx.TransportError as e:
+                transient = str(e) or type(e).__name__
+            except Exception as e:
+                return False, None, str(e)
 
-        except httpx.TimeoutException:
-            return False, None, "Request timed out"
-        except Exception as e:
-            return False, None, str(e)
+            if attempt == MAX_REQUEST_ATTEMPTS:
+                return False, None, transient
+            backoff = REQUEST_BACKOFF_BASE * (2 ** (attempt - 1))
+            logger.warning(f"{operation} attempt {attempt} failed ({transient}), retrying in {backoff}s")
+            await asyncio.sleep(backoff)
 
     async def _graphql_get_with_fallbacks(
         self,
