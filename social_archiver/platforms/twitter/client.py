@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
@@ -246,43 +247,59 @@ class TwitterClient:
         url = f"{config.TWITTER_API_BASE}/{query_id}/{operation}?{urlencode(params)}"
 
         client = await self._get_client()
+        response, error = await self._send_with_retry(operation, lambda: client.get(url, headers=self._get_headers()))
+        if error:
+            return False, None, error
+
+        if response.status_code == 404:
+            return False, None, f"HTTP 404 (query_id={query_id})"
+        if response.status_code == 429:
+            return False, None, "Rate limited (429)"
+        if response.status_code != 200:
+            return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
+        return self._graphql_payload(response)
+
+    async def _send_with_retry(
+        self, label: str, send: Callable[[], Awaitable[httpx.Response]]
+    ) -> tuple[httpx.Response, None] | tuple[None, str]:
+        """Retry a request that could answer differently next time: a dropped connection
+        or a 5xx. A 429 waits out the bucket and is re-sent once inline. Every other
+        status is the server's real answer and belongs to the caller."""
         for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
             try:
                 self.request_count += 1
-                response = await client.get(url, headers=self._get_headers())
+                response = await send()
 
                 if response.status_code == 429 and await self._wait_for_rate_limit(response):
                     self.request_count += 1
-                    response = await client.get(url, headers=self._get_headers())
+                    response = await send()
 
-                if response.status_code == 404:
-                    return False, None, f"HTTP 404 (query_id={query_id})"
-                if response.status_code == 429:
-                    return False, None, "Rate limited (429)"
-                if response.status_code in TRANSIENT_STATUS:
-                    transient = f"HTTP {response.status_code}"
-                elif response.status_code != 200:
-                    return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
-                else:
-                    data = response.json()
-                    if data.get("errors"):
-                        error_msg = ", ".join(e.get("message", "") for e in data["errors"])
-                        if data.get("data"):
-                            logger.warning(f"GraphQL errors (non-fatal): {error_msg}")
-                        else:
-                            return False, None, error_msg
-                    return True, data, None
-
+                if response.status_code not in TRANSIENT_STATUS:
+                    return response, None
+                transient = f"HTTP {response.status_code}"
             except httpx.TransportError as e:
                 transient = str(e) or type(e).__name__
             except Exception as e:
-                return False, None, str(e)
+                return None, str(e)
 
             if attempt == MAX_REQUEST_ATTEMPTS:
-                return False, None, transient
+                return None, transient
             backoff = REQUEST_BACKOFF_BASE * (2 ** (attempt - 1))
-            logger.warning(f"{operation} attempt {attempt} failed ({transient}), retrying in {backoff}s")
+            logger.warning(f"{label} attempt {attempt} failed ({transient}), retrying in {backoff}s")
             await asyncio.sleep(backoff)
+
+    def _graphql_payload(self, response: httpx.Response) -> tuple[bool, dict | None, str | None]:
+        """A GraphQL 200 can still carry errors, and carry data alongside them."""
+        try:
+            data = response.json()
+        except Exception as e:
+            return False, None, str(e)
+        if data.get("errors"):
+            error_msg = ", ".join(e.get("message", "") for e in data["errors"])
+            if not data.get("data"):
+                return False, None, error_msg
+            logger.warning(f"GraphQL errors (non-fatal): {error_msg}")
+        return True, data, None
 
     async def _graphql_get_with_fallbacks(
         self,
@@ -364,27 +381,19 @@ class TwitterClient:
             body["fieldToggles"] = field_toggles
 
         client = await self._get_client()
-        try:
-            self.request_count += 1
-            response = await client.post(url, headers=self._get_headers(), json=body)
-            if response.status_code == 404:
-                return False, None, f"HTTP 404 POST (query_id={query_id})"
-            if response.status_code == 429:
-                return False, None, "Rate limited (429)"
-            if response.status_code != 200:
-                return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
-            data = response.json()
-            if data.get("errors"):
-                error_msg = ", ".join(e.get("message", "") for e in data["errors"])
-                if data.get("data"):
-                    logger.warning(f"GraphQL POST errors (non-fatal): {error_msg}")
-                else:
-                    return False, None, error_msg
-            return True, data, None
-        except httpx.TimeoutException:
-            return False, None, "Request timed out"
-        except Exception as e:
-            return False, None, str(e)
+        response, error = await self._send_with_retry(
+            f"{operation} POST", lambda: client.post(url, headers=self._get_headers(), json=body)
+        )
+        if error:
+            return False, None, error
+
+        if response.status_code == 404:
+            return False, None, f"HTTP 404 POST (query_id={query_id})"
+        if response.status_code == 429:
+            return False, None, "Rate limited (429)"
+        if response.status_code != 200:
+            return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
+        return self._graphql_payload(response)
 
     def _parse_tweet_detail_response(self, data: dict, focal_tweet_id: str) -> dict[str, Any]:
         data_root = data.get("data", {})
@@ -558,29 +567,24 @@ class TwitterClient:
         for query_id in self._get_query_ids("SearchTimeline"):
             params = {"variables": json.dumps(variables, separators=(",", ":"))}
             url = f"{config.TWITTER_API_BASE}/{query_id}/SearchTimeline?{urlencode(params)}"
-            try:
-                self.request_count += 1
-                response = await client.post(
-                    url, headers=self._get_headers(), json={"features": TIMELINE_FEATURES, "queryId": query_id}
-                )
-                if response.status_code == 429 and await self._wait_for_rate_limit(response):
-                    self.request_count += 1
-                    response = await client.post(
-                        url, headers=self._get_headers(), json={"features": TIMELINE_FEATURES, "queryId": query_id}
-                    )
-                if response.status_code == 404:
-                    last_error = f"HTTP 404 (query_id={query_id})"
-                    continue
-                if response.status_code == 429:
-                    return False, None, "Rate limited (429)"
-                if response.status_code != 200:
-                    return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
-                data = response.json()
-                if data.get("errors") and not data.get("data"):
-                    return False, None, ", ".join(e.get("message", "") for e in data["errors"])
-                return True, data, None
-            except httpx.TimeoutException:
-                return False, None, "Request timed out"
+            body = {"features": TIMELINE_FEATURES, "queryId": query_id}
+
+            response, error = await self._send_with_retry(
+                "SearchTimeline", lambda: client.post(url, headers=self._get_headers(), json=body)
+            )
+            # A transport failure is the network, not the query id, so the remaining ids
+            # would fail the same way. Only a 404 means this id is the wrong one.
+            if error:
+                return False, None, error
+
+            if response.status_code == 404:
+                last_error = f"HTTP 404 (query_id={query_id})"
+                continue
+            if response.status_code == 429:
+                return False, None, "Rate limited (429)"
+            if response.status_code != 200:
+                return False, None, f"HTTP {response.status_code}: {response.text[:200]}"
+            return self._graphql_payload(response)
         return False, None, last_error or "All query IDs failed"
 
     async def get_conversation_author_tweets(
