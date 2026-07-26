@@ -114,18 +114,31 @@ class ArchiveJob:
         returns a tombstone naming the author and the country. That costs a request each, so only
         the ones still carrying no reason are asked about."""
         unnamed = [item for item in refused if item.text == TOMBSTONE_REASON_BATCH]
-        if left := len(unnamed) - TOMBSTONE_PROBE_LIMIT:
-            logger.info(f"{left} refusals left unnamed this run; rerun --retry-failed to continue")
+        named: set[str] = set()
+        spent = 0
 
-        for item in unnamed[:TOMBSTONE_PROBE_LIMIT]:
+        for item in unnamed:
+            # A conversation answers for every unavailable tweet in it, so one that arrived in an
+            # earlier reply's answer costs nothing here.
+            if item.item_id in named:
+                continue
+            if spent >= TOMBSTONE_PROBE_LIMIT:
+                remaining = len(unnamed) - len(named)
+                logger.info(f"{remaining} refusals left unnamed this run; rerun --retry-failed to continue")
+                break
             try:
+                spent += 1
                 thread = await self.tw_client.get_thread(item.item_id, page_delay=PAGE_DELAY)
             except Exception as e:
                 logger.warning(f"Could not ask why {item.item_id} was refused: {e}")
                 continue
-            if reason := thread.tombstones.get(item.item_id):
-                await self.db.set_tombstone_reason(item.item_id, reason)
-                logger.info(f"{item.item_id}: {reason}")
+            for tweet_id, reason in thread.tombstones.items():
+                if await self.db.set_tombstone_reason(tweet_id, reason):
+                    named.add(tweet_id)
+                    logger.info(f"{tweet_id}: {reason}")
+
+        if named:
+            logger.info(f"Named {len(named)} refusals in {spent} requests")
 
     async def _expand_recovered(self, category: str, seeds: list[dict[str, Any]]):
         """A recovered tweet arrives with its graph unexplored: while it was a tombstone it had no
