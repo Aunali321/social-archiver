@@ -45,10 +45,24 @@ class ArchiveJob:
         self.tg = tg
 
     async def run(self, fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
-        for cat in CATEGORIES:
-            if category in (None, cat.name):
-                await self._archive_category(cat, fetch_all)
+        # Backlog first. Those URLs were minted by an earlier run and are the closest to expiring.
         await download_pending(self.db, self.port, retry_failed)
+
+        failures = []
+        for cat in CATEGORIES:
+            if category not in (None, cat.name):
+                continue
+            try:
+                await self._archive_category(cat, fetch_all)
+            except Exception as e:
+                failures.append(e)
+
+        # Before raising, so a category that died part way through still keeps the media it
+        # recorded, and one failing category does not strand the other's downloads.
+        await download_pending(self.db, self.port, retry_failed)
+
+        if failures:
+            raise ExceptionGroup("archive failures", failures)
 
     async def _archive_category(self, category: Category, fetch_all: bool):
         logger.info(f"Archiving {category.name} (fetch_all={fetch_all})")
