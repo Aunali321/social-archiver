@@ -20,3 +20,5 @@ services:
       - ${ARCHIVE_ROOT:-.}/data:/data
       - ${ARCHIVE_ROOT:-.}/downloads:/downloads
       - ${ARCHIVE_ROOT:-.}/logs:/logs
+      # Times in the UI and the logs are the host's rather than UTC. Set TZ in .env to override.
+      - /etc/localtime:/etc/localtime:ro
