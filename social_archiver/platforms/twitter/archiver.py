@@ -2,6 +2,7 @@ import asyncio
 import logging
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,10 @@ PAGE_DELAY = 1.5
 # Naming a refusal costs one TweetDetail request each, so a run only asks about this many and
 # says how many it left. Answered ones carry their reason and are never asked about again.
 TOMBSTONE_PROBE_LIMIT = 100
+
+# How long a walked conversation counts as walked. Replies arrive close to a tweet and then stop,
+# so re-searching every run buys almost nothing; leaving it forever would miss the late ones.
+SEARCH_REFRESH = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +150,7 @@ class ArchiveJob:
         payload, so its quoted tweet, its parent and its own thread were never followed. Origins
         are left alone — how each tweet was found belongs to the run that found it."""
         cat = next(c for c in CATEGORIES if c.name == category)
-        expander = TweetExpander(self.tw_client, page_delay=PAGE_DELAY, seed_origin=cat.seed_origin)
+        expander = await self._expander(cat.seed_origin)
         tweets = await expander.expand(seeds)
 
         existing = await self.db.all_ids(PLATFORM)
@@ -153,6 +158,13 @@ class ArchiveJob:
         logger.info(f"Recovered {category} expanded into {len(new_tweets)} further tweets")
         for tweet in new_tweets:
             await self.db.insert(tweet.to_item(category))
+        await self.db.mark_searched(PLATFORM, expander.newly_searched)
+
+    async def _expander(self, seed_origin: str) -> TweetExpander:
+        searched = await self.db.searched_conversations(PLATFORM, datetime.now() - SEARCH_REFRESH)
+        if searched:
+            logger.info(f"Skipping {len(searched)} conversations walked within {SEARCH_REFRESH.days} days")
+        return TweetExpander(self.tw_client, page_delay=PAGE_DELAY, seed_origin=seed_origin, searched=searched)
 
     async def _archive_category(self, category: Category, fetch_all: bool):
         logger.info(f"Archiving {category.name} (fetch_all={fetch_all})")
@@ -189,7 +201,7 @@ class ArchiveJob:
         await self._backfill_from_export(category)
 
     async def _expand_and_record(self, category: Category, seeds: list[dict[str, Any]]):
-        expander = TweetExpander(self.tw_client, page_delay=PAGE_DELAY, seed_origin=category.seed_origin)
+        expander = await self._expander(category.seed_origin)
         tweets = await expander.expand(seeds)
         logger.info(f"Expanded {len(seeds)} {category.name} into {len(tweets)} tweets")
 
@@ -207,6 +219,7 @@ class ArchiveJob:
         logger.info(f"Recording {len(new_tweets)} new tweets ({len(tweets) - len(new_tweets)} already archived)")
         for tweet in new_tweets:
             await self.db.insert(tweet.to_item(category.name))
+        await self.db.mark_searched(PLATFORM, expander.newly_searched)
 
     async def _fetch_seeds(self, category: Category, known_ids: set[str] | None) -> list[dict[str, Any]]:
         fetch = {"likes": self.tw_client.get_all_likes, "bookmarks": self.tw_client.get_all_bookmarks}[category.name]

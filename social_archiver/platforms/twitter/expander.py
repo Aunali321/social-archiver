@@ -58,7 +58,13 @@ def _refs_of(tweet: dict[str, Any]) -> list[str]:
 
 
 class TweetExpander:
-    def __init__(self, tw_client: TwitterClient, page_delay: float = 1.5, seed_origin: str = "liked"):
+    def __init__(
+        self,
+        tw_client: TwitterClient,
+        page_delay: float = 1.5,
+        seed_origin: str = "liked",
+        searched: set[tuple[str, str]] | None = None,
+    ):
         self.tw_client = tw_client
         self.page_delay = page_delay
         self.seed_origin = seed_origin
@@ -69,8 +75,15 @@ class TweetExpander:
         self._seed_ids: set[str] = set()
         self._probe_ids: set[str] = set()  # fetch for graph knowledge only, don't archive
         self._unresolvable: set[str] = set()  # requested and not returned; don't re-request
-        self._searched_pairs: set[tuple[str, str]] = set()
+        self._searched_pairs: set[tuple[str, str]] = set(searched or ())
+        self._newly_searched: set[tuple[str, str]] = set()  # this run's, for the caller to persist
         self._detail_fetched: set[str] = set()  # conversations fetched via TweetDetail fallback
+
+    @property
+    def newly_searched(self) -> set[tuple[str, str]]:
+        """Pairs this run actually searched. Pairs it was told to skip are excluded, so their
+        recorded time keeps ageing and the conversation is eventually walked again."""
+        return self._newly_searched
 
     async def expand(self, seed_tweets: list[dict[str, Any]]) -> list[SimpleTweet]:
         """Entry point: expands raw seed tweet dicts (from get_all_likes /
@@ -200,6 +213,7 @@ class TweetExpander:
             logger.info(f"Searching {len(pairs)} (author, conversation) pairs for thread tweets")
             found = await self.tw_client.get_conversation_author_tweets(pairs, page_delay=self.page_delay)
             self._searched_pairs.update(pairs)
+            self._newly_searched.update(pairs)
             for tweet in found:
                 self._ingest(tweet)
 

@@ -271,6 +271,16 @@ class Database:
                 updated_at TIMESTAMP NOT NULL,
                 PRIMARY KEY (platform, category)
             );
+
+            -- Conversations thread discovery has already walked. Pairs are rederived from the
+            -- whole archive every run, so without this a repeat run researches what it has.
+            CREATE TABLE IF NOT EXISTS searched_conversations (
+                platform TEXT NOT NULL,
+                author TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                searched_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (platform, author, conversation_id)
+            );
         """)
         await self._connection.commit()
 
@@ -298,6 +308,27 @@ class Database:
         starts from the top rather than replaying the last page forever."""
         await self._connection.execute(
             "DELETE FROM fetch_cursors WHERE platform = ? AND category = ?", (platform, category)
+        )
+        await self._connection.commit()
+
+    async def searched_conversations(self, platform: str, since: datetime) -> set[tuple[str, str]]:
+        cursor = await self._connection.execute(
+            "SELECT author, conversation_id FROM searched_conversations WHERE platform = ? AND searched_at > ?",
+            (platform, since.isoformat()),
+        )
+        return {(row["author"], row["conversation_id"]) for row in await cursor.fetchall()}
+
+    async def mark_searched(self, platform: str, pairs: Iterable[tuple[str, str]]):
+        """Call only after the tweets the search returned are committed. In that order a crash
+        costs a repeated search; the reverse drops a conversation nothing will look at again."""
+        now = datetime.now().isoformat()
+        await self._connection.executemany(
+            """
+            INSERT INTO searched_conversations (platform, author, conversation_id, searched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(platform, author, conversation_id) DO UPDATE SET searched_at = excluded.searched_at
+            """,
+            [(platform, author, conversation_id, now) for author, conversation_id in pairs],
         )
         await self._connection.commit()
 
