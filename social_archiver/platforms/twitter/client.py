@@ -44,6 +44,24 @@ TRANSIENT_STATUS = {500, 502, 503, 504}
 MAX_REQUEST_ATTEMPTS = 3
 REQUEST_BACKOFF_BASE = 2  # seconds, doubled per attempt
 
+# `Latest` ignores `count` and serves 20 a page to a hard stop at 40, past which it returns no
+# cursor at all. `Top` does honour a larger `count`, and returns fewer when asked for fewer.
+SEARCH_COUNT = {"Latest": 20, "Top": 50}
+
+# The 40 `Latest` stops at. A slice returning fewer cannot have been truncated, which is what
+# makes it safe to end the walk there.
+SEARCH_RESULT_CAP = 40
+
+# A page below this many results ends the walk, saving the request that would only confirm it.
+# `Latest` fills its 20 exactly until it runs out, so a short page is provably the end. `Top`
+# has no fixed page size and its results vary between identical calls, so nothing about a short
+# page proves exhaustion there: it always walks to an empty cursor.
+SEARCH_TERMINAL_BELOW = {"Latest": 20}
+
+# A thread longer than this many slices is not something search will finish; stop rather than
+# loop forever on a conversation that keeps yielding.
+MAX_CONVERSATION_SLICES = 25
+
 # Fallback query IDs to try when primary ones get 404
 FALLBACK_QUERY_IDS = {
     "Bookmarks": ["tmd4ifV8RHltzn8ymGg1aw"],
@@ -525,7 +543,10 @@ class TwitterClient:
         self, query: str, product: str = "Latest", max_pages: int = 20, page_delay: float = 1.5
     ) -> list[dict[str, Any]]:
         """Run a search query, paginating the Bottom cursor to exhaustion.
-        Page size is capped at 20 by the API regardless of count."""
+
+        A page too small to be a full one ends the walk rather than spending a request to be told
+        there is no more. The threshold is per product because they fill pages differently."""
+        terminal_below = SEARCH_TERMINAL_BELOW.get(product)
         all_tweets: list[dict[str, Any]] = []
         seen: set[str] = set()
         cursor = None
@@ -534,7 +555,12 @@ class TwitterClient:
             if page > 0 and page_delay > 0:
                 await asyncio.sleep(page_delay)
 
-            variables = {"rawQuery": query, "count": 20, "querySource": "typed_query", "product": product}
+            variables = {
+                "rawQuery": query,
+                "count": SEARCH_COUNT.get(product, 20),
+                "querySource": "typed_query",
+                "product": product,
+            }
             if cursor:
                 variables["cursor"] = cursor
 
@@ -545,12 +571,17 @@ class TwitterClient:
             timeline = data.get("data", {}).get("search_by_raw_query", {}).get("search_timeline", {})
             instructions = timeline.get("timeline", {}).get("instructions", [])
 
+            returned = 0
             added = 0
             for tweet in _parse_tweets_from_instructions(instructions):
+                returned += 1
                 if tweet["id"] not in seen:
                     seen.add(tweet["id"])
                     all_tweets.append(tweet)
                     added += 1
+
+            if terminal_below and returned < terminal_below:
+                break
 
             next_cursor = _extract_cursor(instructions)
             if not next_cursor or next_cursor == cursor or added == 0:
@@ -588,22 +619,58 @@ class TwitterClient:
         return False, None, last_error or "All query IDs failed"
 
     async def get_conversation_author_tweets(
-        self, pairs: list[tuple[str, str]], batch_size: int = 5, page_delay: float = 1.5
+        self, pairs: list[tuple[str, str]], page_delay: float = 1.5
     ) -> list[dict[str, Any]]:
-        """Fetch all tweets each author posted in their conversation, OR-batching
-        multiple (author_username, conversation_id) pairs into one search query.
-        Returns only what the search index can see (misses protected authors)."""
-        all_tweets: list[dict[str, Any]] = []
-        unique_pairs = list(dict.fromkeys(pairs))
+        """Fetch all tweets each author posted in their conversation, one conversation per query.
 
-        for i in range(0, len(unique_pairs), batch_size):
+        A query's results are capped well under what a busy conversation can hold, and the cap is
+        spent by the whole query, so OR-batching several conversations into one silently drops
+        whatever did not fit. One conversation per query is the only shape that cannot lose them.
+        Protected authors are invisible to search whatever the shape."""
+        all_tweets: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for i, (author, conv) in enumerate(dict.fromkeys(pairs)):
             if i > 0 and page_delay > 0:
                 await asyncio.sleep(page_delay)
-            batch = unique_pairs[i : i + batch_size]
-            query = " OR ".join(f"(from:{author} conversation_id:{conv})" for author, conv in batch)
-            all_tweets.extend(await self.search_tweets(query, page_delay=page_delay))
+            for tweet in await self._walk_conversation(author, conv, page_delay):
+                if tweet["id"] not in seen:
+                    seen.add(tweet["id"])
+                    all_tweets.append(tweet)
 
         return all_tweets
+
+    async def _walk_conversation(self, author: str, conv: str, page_delay: float) -> list[dict[str, Any]]:
+        """Walk one conversation to exhaustion.
+
+        The cap is a window rather than a wall: the API stops returning a cursor at it, but
+        `max_id` slides the window back, and each slice gets its own budget. A slice that comes
+        back under the cap could not have been truncated, so it ends the walk. `Latest` is what
+        makes this work, being ordered by id; `Top` ranks by relevance and just resamples."""
+        base = f"(from:{author} conversation_id:{conv})"
+        found: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        query = base
+
+        for _ in range(MAX_CONVERSATION_SLICES):
+            slice_tweets = await self.search_tweets(query, product="Latest", page_delay=page_delay)
+            fresh = [tweet for tweet in slice_tweets if tweet["id"] not in seen]
+            if not fresh:
+                break
+            seen.update(tweet["id"] for tweet in slice_tweets)
+            found.extend(fresh)
+            if len(slice_tweets) < SEARCH_RESULT_CAP:
+                break
+            query = f"{base} max_id:{min(int(tweet['id']) for tweet in slice_tweets) - 1}"
+            if page_delay > 0:
+                await asyncio.sleep(page_delay)
+
+        # Some conversations the index will not serve under `Latest` still answer under `Top`,
+        # so it is worth one request where the cheap path found nothing at all.
+        if not found:
+            found = await self.search_tweets(base, product="Top", page_delay=page_delay)
+
+        return found
 
     # =========================================================================
     # Bookmarks
