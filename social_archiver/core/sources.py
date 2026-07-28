@@ -22,7 +22,7 @@ from typing import Protocol
 
 import aiosqlite
 
-from social_archiver.core.database import Database, Item
+from social_archiver.core.database import ArchiveStatus, Database, Item
 from social_archiver.core.jobs import PlatformPort, download_pending
 
 logger = logging.getLogger(__name__)
@@ -101,29 +101,41 @@ class SourceJob:
         self.port = port
         self.fetcher = fetcher
 
-    async def run(self, ref: SourceRef, since: str | None = None) -> int:
+    async def run(self, ref: SourceRef, since: str | None = None, download: bool = True) -> int:
         if ref.kind not in self.fetcher.kinds:
             raise ValueError(f"{ref.platform} has no source kind {ref.kind!r}; it offers {self.fetcher.kinds}")
 
         category = self.fetcher.category(ref)
         logger.info(f"Archiving {ref} ({'full walk' if since is None else f'since {since}'})")
 
-        recorded = 0
+        recorded = repaired = 0
         async for batch in self.fetcher.walk(ref, since):
             if not batch:
                 continue
-            existing = await self.db.all_ids(self.port.platform)
-            fresh = [item for item in batch if item.item_id not in existing]
+            held = await self.db.held_status([item.item_id for item in batch])
+            fresh = [item for item in batch if item.item_id not in held]
             for item in fresh:
                 item.category = category
                 item.source_target = ref.target
-                await self.db.insert(item)
+            await self.db.insert_many(fresh)
+
+            # A row archived record-only because the item was already gone when it was first
+            # fetched, which this source still has the content for. Sources capture at their
+            # own time rather than on request, so they outlive a deletion the platform has
+            # since applied.
+            repaired += await self.db.repair_tombstones(
+                [
+                    item
+                    for item in batch
+                    if held.get(item.item_id) is ArchiveStatus.TOMBSTONE
+                    and item.archive_status is not ArchiveStatus.TOMBSTONE
+                ]
+            )
 
             # Everything else the walk returned is already archived, almost always because the
             # account was liked before it was tracked. Those rows keep the category and the
             # media folder they were first stored under — one copy of a file, not two — but
             # they still belong to this source, so both are recorded rather than skipped.
-            held = [item.item_id for item in batch if item.item_id in existing]
             if held:
                 await self.db.add_categories((item_id, category) for item_id in held)
                 await self.db.attribute_to_source(self.port.platform, held, ref.target)
@@ -134,7 +146,12 @@ class SourceJob:
                 f"{f', attributed {len(held)} already held' if held else ''} ({recorded} so far)"
             )
 
-        logger.info(f"{ref}: {recorded} new item(s)")
+        logger.info(f"{ref}: {recorded} new item(s)" + (f", {repaired} deleted item(s) recovered" if repaired else ""))
+        if not download:
+            # Recorded with their media urls and left pending, which is what a later run, or
+            # any other job that downloads, picks them up from.
+            logger.info(f"{ref}: media not downloaded, left pending")
+            return recorded
         # After the walk rather than per batch: media is on a CDN with no rate limit, so there
         # is nothing to gain by interleaving, and one pass keeps the walk's pacing predictable.
         await download_pending(self.db, self.port)

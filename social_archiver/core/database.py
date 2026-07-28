@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from enum import StrEnum
@@ -268,6 +268,10 @@ class Item:
 
 _ITEM_COLUMNS = [f.name for f in fields(Item)]
 
+# sqlite caps the host parameters one statement may carry. A lookup wider than this is split
+# across several statements rather than silently returning a short answer.
+_MAX_PARAMETERS = 900
+
 
 def _to_column(item: Item, name: str) -> str | int | float | None:
     value = getattr(item, name)
@@ -362,6 +366,24 @@ class Database:
         )
         await self._connection.commit()
 
+    async def insert_many(self, items: Sequence[Item]):
+        """The whole batch in one transaction. `insert` commits per row, which is what an
+        interactive fetch wants and what a walk of a source cannot afford: a subreddit runs to
+        millions of items, and a commit each turns the ingest into that many round trips."""
+        if not items:
+            return
+        columns = ", ".join(_ITEM_COLUMNS)
+        placeholders = ", ".join("?" * len(_ITEM_COLUMNS))
+        await self._connection.executemany(
+            f"INSERT OR IGNORE INTO items ({columns}) VALUES ({placeholders})",
+            [[_to_column(item, name) for name in _ITEM_COLUMNS] for item in items],
+        )
+        await self._connection.executemany(
+            "INSERT OR IGNORE INTO item_categories (item_id, category) VALUES (?, ?)",
+            [(item.item_id, item.category) for item in items],
+        )
+        await self._connection.commit()
+
     async def add_categories(self, pairs: Iterable[tuple[str, str]]):
         """Record category membership for items that already exist, which is how an item
         archived under one category gets attributed to the others it also belongs to."""
@@ -395,6 +417,66 @@ class Database:
     async def all_ids(self, platform: str) -> set[str]:
         cursor = await self._connection.execute("SELECT item_id FROM items WHERE platform = ?", (platform,))
         return {row["item_id"] for row in await cursor.fetchall()}
+
+    async def held_status(self, item_ids: Sequence[str]) -> dict[str, ArchiveStatus]:
+        """How far each of these already got, for whichever are held, by primary key rather
+        than by reading the table. `all_ids` answers the same question for a whole run at once,
+        which is right when the caller asks once and wrong when it asks per batch: the scan
+        then costs more with every batch, against an archive the walk is itself growing.
+
+        No platform predicate, deliberately. Each platform owns its database file, so the
+        column is constant within one and narrows nothing, but naming it lets sqlite prefer an
+        index that leads with it and walk every row of the platform instead of seeking the
+        primary key. Measured at four million rows: 1,764 ms against 0.3 ms."""
+        held: dict[str, ArchiveStatus] = {}
+        for start in range(0, len(item_ids), _MAX_PARAMETERS):
+            chunk = item_ids[start : start + _MAX_PARAMETERS]
+            cursor = await self._connection.execute(
+                f"SELECT item_id, archive_status FROM items WHERE item_id IN ({', '.join('?' * len(chunk))})", chunk
+            )
+            held.update({row["item_id"]: ArchiveStatus(row["archive_status"]) for row in await cursor.fetchall()})
+        return held
+
+    async def repair_tombstones(self, items: Sequence[Item]) -> int:
+        """Fill record-only rows from a source that still holds what the platform has dropped.
+
+        Guarded on the row still being a tombstone, which is what keeps a live row from ever
+        being overwritten and makes a repeated run a no-op. It matters because a source carries
+        what it captured, and for a score or an edit that is older than what is already held.
+
+        The stage statuses go back to pending because a tombstone skipped them: the row has
+        content now, so it downloads, uploads and embeds like any other."""
+        if not items:
+            return 0
+        cursor = await self._connection.executemany(
+            """
+            UPDATE items
+            SET text = ?, author_username = ?, created_at = COALESCE(created_at, ?),
+                media_urls = ?, media_types = ?, media_count = ?, has_media = ?,
+                link_url = COALESCE(link_url, ?),
+                archive_status = ?, upload_status = 'pending', embed_status = 'pending',
+                archive_error = NULL, archive_attempts = 0
+            WHERE item_id = ? AND archive_status = ?
+            """,
+            [
+                (
+                    item.text,
+                    item.author_username,
+                    _to_column(item, "created_at"),
+                    _to_column(item, "media_urls"),
+                    _to_column(item, "media_types"),
+                    item.media_count,
+                    int(item.has_media),
+                    item.link_url,
+                    item.archive_status,
+                    item.item_id,
+                    ArchiveStatus.TOMBSTONE,
+                )
+                for item in items
+            ],
+        )
+        await self._connection.commit()
+        return cursor.rowcount
 
     async def ids_by_origin(self, platform: str, origin: str) -> set[str]:
         cursor = await self._connection.execute(

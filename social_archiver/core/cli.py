@@ -36,6 +36,11 @@ def build_parser(
             action="store_true",
             help="Walk the whole history again, rather than stopping at the newest item already held",
         )
+        source.add_argument(
+            "--no-media",
+            action="store_true",
+            help="Record items and their media urls without downloading; a later run collects the files",
+        )
 
     run = commands.add_parser("run", help="Run archive, upload, and embed once, in order")
     run.add_argument("--history", action="store_true", help="Fetch the full history, not just new items")

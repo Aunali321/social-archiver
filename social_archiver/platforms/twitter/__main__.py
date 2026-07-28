@@ -38,7 +38,7 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
         await tw_client.close()
 
 
-async def source(target: str, kind: str = "profile", full: bool = False):
+async def source(target: str, kind: str = "profile", full: bool = False, no_media: bool = False):
     config.validate_archive()
     tw_client = TwitterClient()
     try:
@@ -50,7 +50,7 @@ async def source(target: str, kind: str = "profile", full: bool = False):
             # A full walk deliberately ignores what is held, so re-running one repairs an
             # account whose earlier walk was cut short.
             since = None if full else await job.watermark_after(ref)
-            await job.run(ref, since)
+            await job.run(ref, since, download=not no_media)
     finally:
         await tw_client.close()
 
@@ -105,7 +105,7 @@ def main():
         case "embed":
             asyncio.run(embed(args.retry_failed))
         case "source":
-            asyncio.run(source(args.target, args.kind, args.full))
+            asyncio.run(source(args.target, args.kind, args.full, args.no_media))
         case "run":
             asyncio.run(run_all(args.history))
 
