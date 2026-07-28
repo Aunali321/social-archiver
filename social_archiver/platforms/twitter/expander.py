@@ -28,7 +28,12 @@ from social_archiver.platforms.twitter.simple_tweet import SimpleTweet
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 10
+# Expansion walks the reply and quote graph breadth-first, so the rounds it needs are the graph's
+# depth rather than a budget. Every round strictly consumes from finite pools — pairs not yet
+# searched, ids not yet resolved — so the loop ends on its own; this only stops a runaway. Ten was
+# low enough to cut off runs that were still discovering, and discovery lost that way never comes
+# back: pairs are derived from the run's own seeds, so a later run never revisits them.
+MAX_ITERATIONS = 50
 
 # The API returns a bare null for a tweet it will not serve, whether it was deleted or is
 # withheld from this connection's country. Protected and suspended arrive with a stated reason;
@@ -78,6 +83,8 @@ class TweetExpander:
         self._searched_pairs: set[tuple[str, str]] = set(searched or ())
         self._newly_searched: set[tuple[str, str]] = set()  # this run's, for the caller to persist
         self._detail_fetched: set[str] = set()  # conversations fetched via TweetDetail fallback
+        self._thread_found: set[str] = set()  # ids search returned, archived or not
+        self._loose_replies: set[str] = set()  # author's replies under others in the conversation
 
     @property
     def newly_searched(self) -> set[tuple[str, str]]:
@@ -98,22 +105,47 @@ class TweetExpander:
 
         logger.info(f"Starting expansion of {len(self._seed_ids)} seed tweets (origin={self.seed_origin})")
 
-        for iteration in range(MAX_ITERATIONS):
+        for _ in range(MAX_ITERATIONS):
             progress = await self._resolve_refs()
             progress |= await self._discover_threads()
             if not progress:
                 break
         else:
-            logger.warning(f"Expansion hit MAX_ITERATIONS={MAX_ITERATIONS}, result may be incomplete")
+            self._log_unfinished()
+
+        self._archive_loose_replies()
 
         tombstoned = sum(1 for tid in self._archived if tid not in self._tweets)
         logger.info(
             f"Expansion complete: {len(self._archived)} tweets total "
             f"({len(self._seed_ids)} seeds, {len(self._archived) - len(self._seed_ids)} discovered, "
-            f"{tombstoned} tombstoned), {self.tw_client.request_count - requests_before} HTTP requests"
+            f"{tombstoned} tombstoned, {len(self._loose_replies)} loose replies), "
+            f"{self.tw_client.request_count - requests_before} HTTP requests"
         )
 
         return self._build_result()
+
+    def _archive_loose_replies(self):
+        """Keep the author's replies made under other people in the conversation.
+
+        The chain walk keeps only their self-reply thread, which leaves behind everything they
+        said elsewhere in a conversation that was liked. Search already returned those, so they
+        cost nothing more. They run after the rounds converge, once chaining is settled: earlier
+        and a self-reply whose parent had not resolved yet would be filed as a loose one."""
+        self._loose_replies = self._thread_found - self._archived
+        self._archived |= self._loose_replies
+
+    def _log_unfinished(self):
+        """Say what the round cap left behind. Stopping here is not a partial result that finishes
+        later: unsearched pairs are derived from this run's own working set, so once it returns
+        they are gone from view."""
+        pairs, fallback = self._pending_pairs()
+        refs, probes = self._pending_ref_ids()
+        logger.warning(
+            f"Expansion hit MAX_ITERATIONS={MAX_ITERATIONS} while still finding work: "
+            f"{len(pairs)} conversations unsearched, {len(fallback)} awaiting the TweetDetail "
+            f"fallback, {len(refs | probes)} references unresolved. Nothing revisits them."
+        )
 
     def _ingest(self, tweet: dict[str, Any]):
         """Add a tweet to the knowledge set; full data wins over shallow stubs.
@@ -216,6 +248,7 @@ class TweetExpander:
             self._newly_searched.update(pairs)
             for tweet in found:
                 self._ingest(tweet)
+                self._thread_found.add(tweet["id"])
 
         # search index gap detection: each searched pair must at least return the
         # tweet that generated it — if not, fetch that conversation via TweetDetail
@@ -368,6 +401,9 @@ class TweetExpander:
             if cached and cached.get("in_reply_to_status_id") == tid:
                 if cached.get("author_username") != tweet.get("author_username"):
                     return "parent"
+
+        if tid in self._loose_replies:
+            return "reply"
 
         return "thread"
 

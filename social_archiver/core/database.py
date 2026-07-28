@@ -395,7 +395,8 @@ class Database:
         cursor = await self._connection.execute(
             """
             UPDATE items SET origin = ?
-            WHERE item_id = ? AND origin IN ('thread', 'parent', 'quoted', 'linked', 'retweet', 'liked_reply', 'submission')
+            WHERE item_id = ? AND origin IN
+                ('thread', 'reply', 'parent', 'quoted', 'linked', 'retweet', 'liked_reply', 'submission')
             """,
             (origin, item_id),
         )
