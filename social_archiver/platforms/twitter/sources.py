@@ -19,7 +19,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 
-from social_archiver.core.database import Item
+from social_archiver.core.database import ArchiveStatus, Item
 from social_archiver.core.sources import SourceRef
 from social_archiver.platforms.twitter.client import SEARCH_RESULT_CAP, TwitterClient
 from social_archiver.platforms.twitter.simple_tweet import SimpleTweet
@@ -43,6 +43,12 @@ class TwitterSourceFetcher:
         """Each account gets its own category, so its media lands in its own folder and it can
         be uploaded or embedded independently of the others."""
         return f"profile-{ref.target.lower()}"
+
+    def lacks_content(self, text: str | None, archive_status: ArchiveStatus) -> bool:
+        """X refuses a tweet it will not serve rather than returning a stripped one, so the
+        archive records the refusal as a status and the text holds the reason. The status is
+        the whole signal; a walk that returns the tweet is entitled to replace it."""
+        return archive_status is ArchiveStatus.TOMBSTONE
 
     async def walk(self, ref: SourceRef, since: str | None) -> AsyncIterator[Sequence[Item]]:
         base = f"from:{ref.target}"

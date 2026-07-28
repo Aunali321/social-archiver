@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from social_archiver.core.database import Item
+from social_archiver.core.database import ArchiveStatus, Item
 from social_archiver.core.sources import SourceRef
 from social_archiver.platforms.reddit.client import raw_media
 from social_archiver.platforms.reddit.simple_post import RedditItem
@@ -35,6 +35,9 @@ BATCH = 1000
 # still real, so the row is worth keeping; the marker is not worth storing as content.
 _REMOVED = frozenset({"[removed]", "[deleted]"})
 
+# The titles Reddit substitutes when the post itself is gone, rather than just its body.
+_REMOVED_TITLES = frozenset({"[deleted by user]", "[ removed by moderator ]", "[ removed by reddit ]"})
+
 
 class RedditSourceFetcher:
     kinds = ("subreddit",)
@@ -46,6 +49,21 @@ class RedditSourceFetcher:
         """Each subreddit gets its own category, so its media lands in its own folder and it
         can be uploaded or embedded independently of the others."""
         return f"subreddit-{ref.target.lower()}"
+
+    def lacks_content(self, text: str | None, archive_status: ArchiveStatus) -> bool:
+        """Reddit serves a removed item rather than refusing it, so the row looks archived and
+        the loss shows only in the text. Three shapes, all present in the archive: a comment
+        whose whole body is the marker, a post whose title is a removal notice, and a post
+        whose real title survived while its body was replaced. That last one is why this reads
+        the parts rather than matching the whole string."""
+        if not text:
+            return True
+        title, _, body = text.strip().partition("\n\n")
+        if title in _REMOVED:
+            return True
+        if body and body.strip() in _REMOVED:
+            return True
+        return title.strip("* ").lower() in _REMOVED_TITLES
 
     async def walk(self, ref: SourceRef, since: str | None) -> AsyncIterator[Sequence[Item]]:
         category = self.category(ref)

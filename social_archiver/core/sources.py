@@ -89,6 +89,15 @@ class SourceFetcher(Protocol):
         start again."""
         ...
 
+    def lacks_content(self, text: str | None, archive_status: ArchiveStatus) -> bool:
+        """Whether this is a record of an item rather than the item, so a source that still has
+        the real thing is allowed to overwrite it.
+
+        Platforms disagree on how they say so. One refuses the item and the archive records a
+        status; another serves the item with a marker where the text used to be, and the row
+        looks archived. Only the platform can read its own signal."""
+        ...
+
 
 class SourceJob:
     """Walks a source, records what it finds, and downloads its media.
@@ -112,23 +121,25 @@ class SourceJob:
         async for batch in self.fetcher.walk(ref, since):
             if not batch:
                 continue
-            held = await self.db.held_status([item.item_id for item in batch])
+            held = await self.db.held([item.item_id for item in batch])
             fresh = [item for item in batch if item.item_id not in held]
             for item in fresh:
                 item.category = category
                 item.source_target = ref.target
             await self.db.insert_many(fresh)
 
-            # A row archived record-only because the item was already gone when it was first
-            # fetched, which this source still has the content for. Sources capture at their
-            # own time rather than on request, so they outlive a deletion the platform has
-            # since applied.
-            repaired += await self.db.repair_tombstones(
+            # Rows holding a record of an item the platform had already dropped, which this
+            # source still has. Sources capture on their own schedule rather than on request,
+            # so they outlive a deletion applied since. Requiring more text than is stored is
+            # what keeps a restore from trading one placeholder for a shorter one.
+            repaired += await self.db.restore_content(
                 [
                     item
                     for item in batch
-                    if held.get(item.item_id) is ArchiveStatus.TOMBSTONE
-                    and item.archive_status is not ArchiveStatus.TOMBSTONE
+                    if (row := held.get(item.item_id)) is not None
+                    and self.fetcher.lacks_content(row.text, row.archive_status)
+                    and not self.fetcher.lacks_content(item.text, item.archive_status)
+                    and len(item.text or "") > len(row.text or "")
                 ]
             )
 
