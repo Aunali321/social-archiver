@@ -24,6 +24,11 @@ REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", f"social-archiver by u/{REDDI
 REDDIT_EXPORT_PATH = os.getenv("REDDIT_EXPORT_PATH")
 REDDIT_EXPORT_BATCH = int(os.getenv("REDDIT_EXPORT_BATCH", "250"))
 
+# Directory of Arctic Shift subreddit dumps, holding r_<subreddit>_posts.jsonl and
+# r_<subreddit>_comments.jsonl. The API cannot serve a whole subreddit, so this is the only
+# way to archive one.
+REDDIT_DUMP_DIR = os.getenv("REDDIT_DUMP_DIR")
+
 # Telegram channels; a category is enabled by configuring its channel
 TELEGRAM_CHAT_SAVED = int(os.getenv("REDDIT_CHAT_SAVED", "0"))
 TELEGRAM_CHAT_UPVOTED = int(os.getenv("REDDIT_CHAT_UPVOTED", "0"))
@@ -52,6 +57,11 @@ def validate_archive():
             REDDIT_USERNAME=REDDIT_USERNAME,
             REDDIT_PASSWORD=REDDIT_PASSWORD,
         )
+
+
+def validate_source():
+    """No Reddit credentials: a dump is read off disk, and its media urls are public."""
+    require(REDDIT_DUMP_DIR=REDDIT_DUMP_DIR)
 
 
 def validate_upload():

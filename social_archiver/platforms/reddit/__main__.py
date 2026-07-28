@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from social_archiver.core.cli import build_parser
 from social_archiver.core.config import ConfigError
 from social_archiver.core.database import Database
 from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
 from social_archiver.core.milvus_manager import MilvusManager
+from social_archiver.core.sources import SourceJob, SourceRef
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.core.utils import setup_logging
 from social_archiver.llm.factory import create_vlm_client
@@ -15,6 +17,7 @@ from social_archiver.platforms.reddit.archiver import ArchiveJob
 from social_archiver.platforms.reddit.client import RedditClient
 from social_archiver.platforms.reddit.embedder import EmbedJob
 from social_archiver.platforms.reddit.port import RedditPort
+from social_archiver.platforms.reddit.sources import RedditSourceFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,15 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
             await ArchiveJob(client, db, PORT, tg).run(fetch_all, category, retry_failed)
     finally:
         await client.close()
+
+
+async def source(target: str, kind: str = "subreddit", full: bool = False, no_media: bool = False):
+    """`full` has no effect here: the dump is a local file, so every run reads all of it and
+    dedupes by id. There is no paging to stop early."""
+    config.validate_source()
+    async with Database(config.DATABASE_PATH) as db:
+        job = SourceJob(db, PORT, RedditSourceFetcher(Path(config.REDDIT_DUMP_DIR)))
+        await job.run(SourceRef(PORT.platform, kind, target), download=not no_media)
 
 
 async def upload(retry_failed: bool = False):
@@ -74,7 +86,11 @@ async def run_all(fetch_all: bool = False):
 
 
 def main():
-    args = build_parser("Reddit archiver", categories=("saved", "upvoted", "downvoted", "own")).parse_args()
+    args = build_parser(
+        "Reddit archiver",
+        categories=("saved", "upvoted", "downvoted", "own"),
+        source_kinds=RedditSourceFetcher.kinds,
+    ).parse_args()
     setup_logging(config.LOG_FILE)
     logger.info(f"Reddit archiver: {args.command}")
 
@@ -85,6 +101,8 @@ def main():
             asyncio.run(upload(args.retry_failed))
         case "embed":
             asyncio.run(embed(args.retry_failed))
+        case "source":
+            asyncio.run(source(args.target, args.kind, args.full, args.no_media))
         case "run":
             asyncio.run(run_all(args.history))
 

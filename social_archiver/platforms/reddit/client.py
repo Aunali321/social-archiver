@@ -132,6 +132,13 @@ class _RawSubmission:
         return self._data.get(name)
 
 
+def raw_media(data: dict, kind: str) -> list[RedditMedia]:
+    """Media for a record that arrived as raw API JSON rather than through praw, which is the
+    shape an archive dump stores. Same extractors as the live path, so a post ingested from a
+    dump resolves to the same urls as the same post fetched from Reddit."""
+    return _submission_media(_RawSubmission(data)) if kind == "post" else _metadata_media(data.get("media_metadata"))
+
+
 def _submission_media(s: Submission) -> list[RedditMedia]:
     """Media in priority order: what the post itself carries, then what it crossposted,
     then the link preview Reddit generated. The preview is never user-uploaded, so it

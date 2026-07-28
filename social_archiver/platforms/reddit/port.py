@@ -8,7 +8,9 @@ from social_archiver.platforms.reddit import config
 
 PLATFORM = "reddit"
 
-SEED_ORIGINS = frozenset({"saved", "upvoted", "downvoted", "own"})
+# A source item was fetched in its own right, like anything the user interacted with, rather
+# than discovered as context around one.
+SEED_ORIGINS = frozenset({"saved", "upvoted", "downvoted", "own", "subreddit"})
 
 _ORIGIN_LABELS = {"submission": "post", "parent": "parent"}
 
