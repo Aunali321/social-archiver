@@ -10,13 +10,16 @@ Fetch strategy (see X_RESEARCH.md for the measurements behind it):
   TweetResultsByRestIds, up to 100 per request, breadth-first until closure.
   Cost scales with graph depth, not tweet count. Missing IDs become tombstones.
 - Phase 2  THREAD DISCOVERY: for tweets with reply_count > 0, the author's tweets
-  in that conversation are fetched via SearchTimeline with OR-batched
-  `(from:author conversation_id:conv)` groups — complete author threads with
-  zero viral-reply noise. reply_count == 0 proves standalone: zero requests.
+  in that conversation are fetched via SearchTimeline, one `(from:author
+  conversation_id:conv)` per query, sliced with `max_id:` past the result cap.
+  reply_count == 0 proves standalone: zero requests.
 - Fallback: TweetDetail (relevance-stop pagination) when the author is protected
   (invisible to search) or the search index provably missed the conversation.
 
-The phases loop until nothing new is discovered.
+The phases loop until nothing new is discovered, then one pass adopts what was
+already fetched but never chained onto anything: the author's replies made under
+other people, and the bystanders a fallback returned along with the tree. Neither
+costs a search request, and both land after the loop so they cannot generate more.
 """
 
 import logging
@@ -85,6 +88,8 @@ class TweetExpander:
         self._detail_fetched: set[str] = set()  # conversations fetched via TweetDetail fallback
         self._thread_found: set[str] = set()  # ids search returned, archived or not
         self._loose_replies: set[str] = set()  # author's replies under others in the conversation
+        self._fallback_seen: set[str] = set()  # every id a TweetDetail fallback returned
+        self._bystanders: set[str] = set()  # fallback tweets by authors the chain walk skipped
 
     @property
     def newly_searched(self) -> set[tuple[str, str]]:
@@ -113,27 +118,61 @@ class TweetExpander:
         else:
             self._log_unfinished()
 
-        self._archive_loose_replies()
+        await self._adopt_unchained()
 
         tombstoned = sum(1 for tid in self._archived if tid not in self._tweets)
         logger.info(
             f"Expansion complete: {len(self._archived)} tweets total "
             f"({len(self._seed_ids)} seeds, {len(self._archived) - len(self._seed_ids)} discovered, "
-            f"{tombstoned} tombstoned, {len(self._loose_replies)} loose replies), "
+            f"{tombstoned} tombstoned, {len(self._loose_replies)} loose replies, "
+            f"{len(self._bystanders)} bystanders), "
             f"{self.tw_client.request_count - requests_before} HTTP requests"
         )
 
         return self._build_result()
 
-    def _archive_loose_replies(self):
-        """Keep the author's replies made under other people in the conversation.
+    async def _adopt_unchained(self):
+        """Keep everything already fetched that the chain walk would otherwise discard.
 
-        The chain walk keeps only their self-reply thread, which leaves behind everything they
-        said elsewhere in a conversation that was liked. Search already returned those, so they
-        cost nothing more. They run after the rounds converge, once chaining is settled: earlier
-        and a self-reply whose parent had not resolved yet would be filed as a loose one."""
+        Two populations, neither of which costs a search request. The author's replies made under
+        other people came back from the conversation search that was run anyway. The rest of a
+        conversation comes back from the TweetDetail fallback, which returns the whole tree and
+        was until now read only for the liked author's own chain.
+
+        This runs after the rounds converge, for two reasons. Chaining has settled, so a
+        self-reply whose parent resolved late is not filed as a loose one. And nothing archived
+        here can reach `_pending_pairs`, which would turn every bystander's author into another
+        conversation search and spend the one bucket that actually constrains the run.
+
+        Their parents are then resolved in their own right, on the batch endpoint: a reply is
+        unreadable without the tweet it answers, and that tweet is by a different author, so
+        nothing else in the expansion would ever reach it."""
         self._loose_replies = self._thread_found - self._archived
-        self._archived |= self._loose_replies
+        self._bystanders = self._fallback_seen - self._archived - self._loose_replies
+        adopted = self._loose_replies | self._bystanders
+        if not adopted:
+            return
+        self._archived |= adopted
+        for _ in range(MAX_ITERATIONS):
+            for tid in adopted:
+                self._adopt_ancestors(tid)
+            if not await self._resolve_refs():
+                break
+
+    def _adopt_ancestors(self, tid: str):
+        """Archive the ancestors of a reply that are already known.
+
+        A parent pulled in as a probe sits in `_tweets` without being archived, and
+        `_pending_ref_ids` only collects ids it has yet to fetch, so it passes over exactly these.
+        Stops at the first unknown ancestor; that one is a reference of an archived tweet now, so
+        the resolve pass fetches it and the next round walks further up."""
+        seen: set[str] = set()
+        while (parent := self._tweets.get(tid, {}).get("in_reply_to_status_id")) and parent not in seen:
+            seen.add(parent)
+            if parent not in self._tweets:
+                return
+            self._archived.add(parent)
+            tid = parent
 
     def _log_unfinished(self):
         """Say what the round cap left behind. Stopping here is not a partial result that finishes
@@ -295,6 +334,8 @@ class TweetExpander:
             return
         for tweet in result.tweets:
             self._ingest(tweet)
+            if tid := tweet.get("id"):
+                self._fallback_seen.add(tid)
         self._tombstones.update(result.tombstones)
 
     def _archive_thread_chains(self):
@@ -404,6 +445,8 @@ class TweetExpander:
 
         if tid in self._loose_replies:
             return "reply"
+        if tid in self._bystanders:
+            return "conversation"
 
         return "thread"
 

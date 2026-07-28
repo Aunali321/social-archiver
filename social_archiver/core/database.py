@@ -396,7 +396,8 @@ class Database:
             """
             UPDATE items SET origin = ?
             WHERE item_id = ? AND origin IN
-                ('thread', 'reply', 'parent', 'quoted', 'linked', 'retweet', 'liked_reply', 'submission')
+                ('thread', 'reply', 'conversation', 'parent', 'quoted', 'linked', 'retweet',
+                 'liked_reply', 'submission')
             """,
             (origin, item_id),
         )
