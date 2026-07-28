@@ -22,9 +22,11 @@ TWITTER_BEARER_TOKEN = (
 TWITTER_DELAY_RANGE = [2, 5]
 
 # Official data export (.zip or extracted dir); like.js backfills full like history.
-# Ingested in chunks so a rate-limited run commits progress and resumes.
 TWITTER_EXPORT_PATH = os.getenv("TWITTER_EXPORT_PATH")
-TWITTER_EXPORT_BATCH = int(os.getenv("TWITTER_EXPORT_BATCH", "250"))
+
+# Seeds expanded before anything is committed. Expansion holds its results until it finishes, so
+# this is what an interrupt costs, whether the seeds came from the timeline or the export.
+TWITTER_EXPAND_BATCH = int(os.getenv("TWITTER_EXPAND_BATCH", "250"))
 
 # Telegram channels; a category is enabled by configuring its channel
 TELEGRAM_CHAT_LIKES = int(os.getenv("TWITTER_CHAT_LIKES", "0"))

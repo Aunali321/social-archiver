@@ -62,6 +62,15 @@ SEARCH_TERMINAL_BELOW = {"Latest": 20}
 # loop forever on a conversation that keeps yielding.
 MAX_CONVERSATION_SLICES = 25
 
+# Timeline endpoints fill a page of 100, measured on both Likes and Bookmarks. Asking for 20 spent
+# five requests where one does, and capped how far back a walk could reach for a given page budget.
+PAGINATE_COUNT = 100
+
+# A runaway guard rather than a budget: a walk ends when the cursor runs out, and stopping on the
+# page count instead is truncation, so it is logged. This holds 60,000 items, above the 57,558 the
+# like export records as the full history.
+PAGINATE_MAX_PAGES = 600
+
 # Fallback query IDs to try when primary ones get 404
 FALLBACK_QUERY_IDS = {
     "Bookmarks": ["tmd4ifV8RHltzn8ymGg1aw"],
@@ -785,7 +794,8 @@ class TwitterClient:
         fetch_fn,
         limit: int = 0,
         page_delay: float = 1.0,
-        max_pages: int = 100,
+        max_pages: int = PAGINATE_MAX_PAGES,
+        count: int = PAGINATE_COUNT,
         known_ids: set | None = None,
         known_hit_threshold: int = 3,
     ) -> dict[str, Any]:
@@ -803,7 +813,7 @@ class TwitterClient:
             if page_num > 0 and page_delay > 0:
                 await asyncio.sleep(page_delay)
 
-            result = await fetch_fn(count=20, cursor=cursor)
+            result = await fetch_fn(count=count, cursor=cursor)
 
             if not result.get("success"):
                 if all_tweets:
@@ -841,6 +851,11 @@ class TwitterClient:
             if not next_cursor or next_cursor == cursor or added == 0:
                 break
             cursor = next_cursor
+        else:
+            logger.warning(
+                f"Stopped at the {max_pages}-page ceiling with {len(all_tweets)} tweets and the "
+                f"timeline still serving; everything older than this was not fetched"
+            )
 
         return {"success": True, "tweets": all_tweets}
 

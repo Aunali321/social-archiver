@@ -194,11 +194,22 @@ class ArchiveJob:
 
         seeds = await self._fetch_seeds(category, known_ids)
         if seeds:
-            await self._expand_and_record(category, seeds)
+            await self._expand_in_chunks(category, seeds)
         else:
             logger.info(f"No new {category.name} from the timeline")
 
         await self._backfill_from_export(category)
+
+    async def _expand_in_chunks(self, category: Category, seeds: list[dict[str, Any]]):
+        """Expand a chunk at a time, committing each before the next. A full timeline walk reaches
+        far enough back that expanding it in one call would put hours of work behind a single
+        interrupt, which is the same reason the export backfill chunks."""
+        batch = config.TWITTER_EXPAND_BATCH
+        for start in range(0, len(seeds), batch):
+            chunk = seeds[start : start + batch]
+            queued = len(seeds) - start - len(chunk)
+            logger.info(f"Expanding {len(chunk)} {category.name} ({queued} still queued)")
+            await self._expand_and_record(category, chunk)
 
     async def _expand_and_record(self, category: Category, seeds: list[dict[str, Any]]):
         expander = await self._expander(category.seed_origin)
@@ -246,7 +257,7 @@ class ArchiveJob:
             queued = [seed for seed in export_seeds if seed["id"] not in existing]
             if not queued:
                 break
-            chunk = queued[: config.TWITTER_EXPORT_BATCH]
+            chunk = queued[: config.TWITTER_EXPAND_BATCH]
             logger.info(f"Export backfill: expanding {len(chunk)} likes ({len(queued) - len(chunk)} still queued)")
             await self._expand_and_record(category, chunk)
 
