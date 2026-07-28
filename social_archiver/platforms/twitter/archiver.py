@@ -55,6 +55,10 @@ class ArchiveJob:
         self.tg = tg
 
     async def run(self, fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
+        # Before the drain, so the retried rows carry urls that can still be served.
+        if retry_failed:
+            await self._refresh_failed_media()
+
         # Backlog first. Those URLs were minted by an earlier run and are the closest to expiring.
         await download_pending(self.db, self.port, retry_failed)
 
@@ -76,6 +80,34 @@ class ArchiveJob:
 
         if failures:
             raise ExceptionGroup("archive failures", failures)
+
+    async def _refresh_failed_media(self):
+        """Re-derive media urls for previously-failed items before retrying them.
+
+        Video variants are signed and time-limited, so one that waited long enough in the pending
+        queue answers 403 while the tweet itself is untouched. The url stored on the row can never
+        recover on its own, since `ensure_media` only ever retries what is already there; asking X
+        again is the only way to mint one that still resolves."""
+        failed = await self.db.failed_archive(PLATFORM)
+        if not failed:
+            return
+
+        logger.info(f"Refreshing media urls for {len(failed)} previously-failed tweets")
+        result = await self.tw_client.get_tweets_by_ids([item.item_id for item in failed], page_delay=PAGE_DELAY)
+
+        changed = settled = 0
+        for raw in result.tweets:
+            tweet = SimpleTweet.from_api_dict(raw)
+            if not await self.db.refresh_media(tweet.id, tweet.media_urls, tweet.media_types, len(tweet.media)):
+                continue
+            changed += 1
+            if not tweet.media_urls:
+                # Nothing left to derive means nothing left to download. Leaving it 'failed'
+                # would requeue it on every run for media that no longer exists.
+                await self.db.mark_archived(tweet.id, [])
+                settled += 1
+
+        logger.info(f"Refreshed {changed} of {len(failed)} ({settled} had no media left, now archived)")
 
     async def _resolve_tombstones(self):
         """Look the tombstoned tweets up again.
