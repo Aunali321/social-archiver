@@ -2,8 +2,13 @@ import argparse
 from collections.abc import Sequence
 
 
-def build_parser(description: str, categories: Sequence[str]) -> argparse.ArgumentParser:
-    """The shared archive/upload/embed/run command line every platform exposes."""
+def build_parser(
+    description: str, categories: Sequence[str], source_kinds: Sequence[str] = ()
+) -> argparse.ArgumentParser:
+    """The shared archive/upload/embed/run command line every platform exposes.
+
+    `source_kinds` is empty for a platform that cannot yet walk an account or a subreddit, and
+    the subcommand is left out rather than offered and refused."""
     parser = argparse.ArgumentParser(description=description)
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -19,6 +24,18 @@ def build_parser(description: str, categories: Sequence[str]) -> argparse.Argume
 
     embed = commands.add_parser("embed", help="Generate VLM descriptions and search embeddings")
     embed.add_argument("--retry-failed", action="store_true", help="Also retry items whose embedding previously failed")
+
+    if source_kinds:
+        source = commands.add_parser("source", help="Archive an account or subreddit in full")
+        source.add_argument("target", help="The account or subreddit to archive")
+        source.add_argument(
+            "--kind", choices=source_kinds, default=source_kinds[0], help="Which kind of source the target is"
+        )
+        source.add_argument(
+            "--full",
+            action="store_true",
+            help="Walk the whole history again, rather than stopping at the newest item already held",
+        )
 
     run = commands.add_parser("run", help="Run archive, upload, and embed once, in order")
     run.add_argument("--history", action="store_true", help="Fetch the full history, not just new items")

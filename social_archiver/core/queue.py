@@ -12,6 +12,56 @@ from pathlib import Path
 
 import aiosqlite
 
+from social_archiver.core import migrations
+from social_archiver.core.sources import SourceRef, TrackedSource
+
+MIGRATIONS = (
+    (
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL,
+            job TEXT NOT NULL,
+            category TEXT,
+            history INTEGER NOT NULL DEFAULT 0,
+            retry_failed INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'queued',
+            source TEXT NOT NULL DEFAULT 'web',
+            queued_at TIMESTAMP NOT NULL,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            error TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(platform, status, id)",
+        """
+        CREATE TABLE IF NOT EXISTS schedules (
+            platform TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL,
+            categories TEXT NOT NULL,
+            next_run TIMESTAMP NOT NULL
+        )
+        """,
+    ),
+    # A source is an account or a subreddit archived in its own right, rather than because it
+    # turned up in something you interacted with. `target` says which one a job is for and is
+    # null for the category jobs, which is what leaves their dedupe untouched.
+    (
+        "ALTER TABLE jobs ADD COLUMN target TEXT",
+        """
+        CREATE TABLE IF NOT EXISTS sources (
+            platform TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            target TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            added_at TIMESTAMP NOT NULL,
+            last_run TIMESTAMP,
+            PRIMARY KEY (platform, kind, target)
+        )
+        """,
+    ),
+)
+
 
 class JobStatus(StrEnum):
     QUEUED = "queued"
@@ -35,6 +85,7 @@ class Job:
     finished_at: datetime | None = None
     error: str | None = None
     source: str = "web"
+    target: str | None = None  # which account or subreddit; only source jobs have one
 
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> "Job":
@@ -54,11 +105,12 @@ class Job:
             finished_at=when("finished_at"),
             error=row["error"],
             source=row["source"],
+            target=row["target"],
         )
 
     @property
     def flags(self) -> str:
-        parts = [self.category] if self.category else []
+        parts = [part for part in (self.target, self.category) if part]
         parts += [name for name, on in (("history", self.history), ("retry-failed", self.retry_failed)) if on]
         return " ".join(parts)
 
@@ -96,31 +148,7 @@ class JobQueue:
         self._connection = await aiosqlite.connect(self.db_path)
         self._connection.row_factory = aiosqlite.Row
         await self._connection.execute("PRAGMA journal_mode=WAL")
-        await self._connection.executescript("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                platform TEXT NOT NULL,
-                job TEXT NOT NULL,
-                category TEXT,
-                history INTEGER NOT NULL DEFAULT 0,
-                retry_failed INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'queued',
-                source TEXT NOT NULL DEFAULT 'web',
-                queued_at TIMESTAMP NOT NULL,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP,
-                error TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(platform, status, id);
-
-            CREATE TABLE IF NOT EXISTS schedules (
-                platform TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL,
-                categories TEXT NOT NULL,
-                next_run TIMESTAMP NOT NULL
-            );
-        """)
-        await self._connection.commit()
+        await migrations.apply(self._connection, MIGRATIONS, "queue", self.db_path)
         await self._release_orphans()
 
     async def close(self):
@@ -145,22 +173,29 @@ class JobQueue:
         history: bool = False,
         retry_failed: bool = False,
         source: str = "web",
+        target: str | None = None,
     ) -> Job | None:
         """Returns None when an identical job is already waiting: a scheduler tick that
-        lands while the queue is backed up should not stack duplicates."""
+        lands while the queue is backed up should not stack duplicates.
+
+        Two source jobs for different targets are not duplicates, so the target takes part in
+        the comparison; it is null for every category job, which leaves those unchanged."""
         duplicate = await self._connection.execute(
-            "SELECT 1 FROM jobs WHERE platform = ? AND job = ? AND category IS ? AND status IN (?, ?)",
-            (platform, job, category, JobStatus.QUEUED, JobStatus.RUNNING),
+            """
+            SELECT 1 FROM jobs
+            WHERE platform = ? AND job = ? AND category IS ? AND target IS ? AND status IN (?, ?)
+            """,
+            (platform, job, category, target, JobStatus.QUEUED, JobStatus.RUNNING),
         )
         if await duplicate.fetchone():
             return None
 
         cursor = await self._connection.execute(
             """
-            INSERT INTO jobs (platform, job, category, history, retry_failed, source, queued_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (platform, job, category, history, retry_failed, source, target, queued_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (platform, job, category, int(history), int(retry_failed), source, datetime.now().isoformat()),
+            (platform, job, category, int(history), int(retry_failed), source, target, datetime.now().isoformat()),
         )
         await self._connection.commit()
         return await self.get(cursor.lastrowid)
@@ -237,3 +272,61 @@ class JobQueue:
         )
         await self._connection.commit()
         return cursor.rowcount > 0
+
+    # =========================================================================
+    # Tracked sources
+    # =========================================================================
+
+    async def add_source(self, ref: SourceRef) -> bool:
+        """False when it was already tracked, so adding twice is not an error."""
+        cursor = await self._connection.execute(
+            """
+            INSERT OR IGNORE INTO sources (platform, kind, target, added_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (ref.platform, ref.kind, ref.target, datetime.now().isoformat()),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
+    async def remove_source(self, ref: SourceRef) -> bool:
+        cursor = await self._connection.execute(
+            "DELETE FROM sources WHERE platform = ? AND kind = ? AND target = ?",
+            (ref.platform, ref.kind, ref.target),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
+    async def set_source_enabled(self, ref: SourceRef, enabled: bool) -> bool:
+        cursor = await self._connection.execute(
+            "UPDATE sources SET enabled = ? WHERE platform = ? AND kind = ? AND target = ?",
+            (int(enabled), ref.platform, ref.kind, ref.target),
+        )
+        await self._connection.commit()
+        return cursor.rowcount > 0
+
+    async def sources(self, platform: str | None = None) -> list[TrackedSource]:
+        sql = "SELECT * FROM sources"
+        params: tuple = ()
+        if platform:
+            sql += " WHERE platform = ?"
+            params = (platform,)
+        cursor = await self._connection.execute(sql + " ORDER BY platform, kind, target", params)
+        return [TrackedSource.from_row(row) for row in await cursor.fetchall()]
+
+    async def source(self, ref: SourceRef) -> TrackedSource | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM sources WHERE platform = ? AND kind = ? AND target = ?",
+            (ref.platform, ref.kind, ref.target),
+        )
+        row = await cursor.fetchone()
+        return TrackedSource.from_row(row) if row else None
+
+    async def record_source_run(self, ref: "SourceRef"):
+        """Only when it was walked. Where the next walk resumes from is the newest item the
+        archive holds for the source, so it is not duplicated here to drift out of step."""
+        await self._connection.execute(
+            "UPDATE sources SET last_run = ? WHERE platform = ? AND kind = ? AND target = ?",
+            (datetime.now().isoformat(), ref.platform, ref.kind, ref.target),
+        )
+        await self._connection.commit()

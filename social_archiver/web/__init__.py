@@ -14,7 +14,16 @@ from pydantic import BaseModel
 
 from social_archiver.core import config
 from social_archiver.core.queue import Job, JobQueue
-from social_archiver.core.worker import JOB_FLAGS, PLATFORMS, categories, enqueue_cycle, next_run, running
+from social_archiver.core.sources import SourceRef
+from social_archiver.core.worker import (
+    JOB_FLAGS,
+    PLATFORMS,
+    categories,
+    enqueue_cycle,
+    next_run,
+    running,
+    source_kinds,
+)
 
 queue = JobQueue(config.DATA_DIR / "jobs.db")
 
@@ -49,12 +58,39 @@ class RunRequest(BaseModel):
     history: bool = False
     retry_failed: bool = False
     category: str | None = None
+    target: str | None = None
+
+
+class SourceRequest(BaseModel):
+    platform: str
+    target: str
+    kind: str | None = None
 
 
 class ScheduleRequest(BaseModel):
     platform: str
     enabled: bool
     categories: list[str]
+
+
+def _source_counts() -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for platform in PLATFORMS:
+        path = config.DATA_DIR / f"{platform}.db"
+        if not path.exists():
+            continue
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = db.execute(
+                "SELECT source_target, count(*) FROM items WHERE platform = ? AND source_target IS NOT NULL GROUP BY 1",
+                (platform,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []  # predates the column; it will appear once the archive is migrated
+        finally:
+            db.close()
+        counts.update({(platform, target): n for target, n in rows})
+    return counts
 
 
 def _counts(db: sqlite3.Connection, column: str) -> dict[str, int]:
@@ -122,6 +158,8 @@ async def run(request: RunRequest) -> dict[str, str]:
         return {"error": "unknown platform or job"}
     if request.category and request.category not in categories(request.platform):
         return {"error": f"{request.platform} has no category {request.category!r}"}
+    if request.job == "source" and not request.target:
+        return {"error": "a source job needs a target"}
 
     job = await queue.enqueue(
         request.platform,
@@ -129,6 +167,7 @@ async def run(request: RunRequest) -> dict[str, str]:
         category=request.category,
         history=request.history,
         retry_failed=request.retry_failed,
+        target=request.target,
     )
     if job is None:
         return {"error": f"{request.platform} {request.job} is already queued or running"}
@@ -161,6 +200,88 @@ async def set_schedule(request: ScheduleRequest) -> dict[str, str]:
     if not request.enabled:
         return {"started": f"{request.platform} schedule paused"}
     return {"started": f"{request.platform} scheduled: {', '.join(request.categories) or 'no categories'}"}
+
+
+@app.get("/api/sources")
+async def list_sources() -> dict:
+    """Tracked sources with how much each has actually produced, so a source that is failing
+    to fetch is distinguishable from one that simply has not run."""
+    tracked = await queue.sources()
+    counts = _source_counts()
+    return {
+        "kinds": {platform: list(source_kinds(platform)) for platform in PLATFORMS},
+        "sources": [
+            {
+                "platform": s.platform,
+                "kind": s.kind,
+                "target": s.target,
+                "enabled": s.enabled,
+                "last_run": s.last_run.strftime("%Y-%m-%d %H:%M") if s.last_run else None,
+                "items": counts.get((s.platform, s.target), 0),
+            }
+            for s in tracked
+        ],
+    }
+
+
+def _resolve(request: SourceRequest) -> SourceRef | str:
+    """The kind is optional in the request: a platform that offers exactly one does not need
+    to be told which, and one that offers none cannot serve the request at all."""
+    kinds = source_kinds(request.platform)
+    if not kinds:
+        return f"{request.platform} cannot archive sources yet"
+    kind = request.kind or kinds[0]
+    if kind not in kinds:
+        return f"{request.platform} has no source kind {kind!r}; it offers {', '.join(kinds)}"
+    target = request.target.strip().lstrip("@").removeprefix("r/")
+    if not target:
+        return "a source needs a target"
+    return SourceRef(request.platform, kind, target)
+
+
+@app.post("/api/sources/add")
+async def add_source(request: SourceRequest) -> dict[str, str]:
+    ref = _resolve(request)
+    if isinstance(ref, str):
+        return {"error": ref}
+    if not await queue.add_source(ref):
+        return {"error": f"{ref} is already tracked"}
+    return {"started": f"tracking {request.platform} {ref}"}
+
+
+@app.post("/api/sources/remove")
+async def remove_source(request: SourceRequest) -> dict[str, str]:
+    """Stops re-walking it. What it already archived stays, since deleting an archive is not
+    something a checkbox should do."""
+    ref = _resolve(request)
+    if isinstance(ref, str):
+        return {"error": ref}
+    if not await queue.remove_source(ref):
+        return {"error": f"{ref} was not tracked"}
+    return {"started": f"stopped tracking {ref}; its items are kept"}
+
+
+@app.post("/api/sources/enabled")
+async def set_source_enabled(request: SourceRequest, enabled: bool) -> dict[str, str]:
+    ref = _resolve(request)
+    if isinstance(ref, str):
+        return {"error": ref}
+    if not await queue.set_source_enabled(ref, enabled):
+        return {"error": f"{ref} is not tracked"}
+    return {"started": f"{ref} {'enabled' if enabled else 'paused'}"}
+
+
+@app.post("/api/sources/run")
+async def run_source(request: SourceRequest, full: bool = False) -> dict[str, str]:
+    """Runs a source whether or not it is tracked, so an account can be archived once without
+    committing to re-walking it forever."""
+    ref = _resolve(request)
+    if isinstance(ref, str):
+        return {"error": ref}
+    job = await queue.enqueue(request.platform, "source", target=ref.target, history=full)
+    if job is None:
+        return {"error": f"{ref} is already queued or running"}
+    return {"started": f"queued {'full walk' if full else 'sync'} of {ref}"}
 
 
 @app.post("/api/cancel/{job_id}")
@@ -267,6 +388,9 @@ INDEX = """<!doctype html>
 <h2>Platforms</h2>
 <div class="grid" id="grid"></div>
 
+<h2>Sources</h2>
+<div class="card" id="sources"></div>
+
 <h2>Queue</h2>
 <div class="scroll"><table id="active"></table></div>
 
@@ -275,6 +399,7 @@ INDEX = """<!doctype html>
 </main>
 <script>
 const FLAGS = {archive:['category','history','retry_failed'], upload:['retry_failed'], embed:['retry_failed']};
+// source jobs are driven from the Sources section, not the per-platform cards
 const cls = k => ({failed:'bad', archived:'ok', done:'ok', pending:'warn',
                    running:'run', queued:'warn', interrupted:'bad'})[k] || '';
 const stat = (label, o) => Object.entries(o || {}).map(([k, v]) =>
@@ -350,6 +475,9 @@ async function load() {
   document.getElementById('grid').innerHTML = d.platforms.map(card).join('');
   restore(state);
 
+  const sources = await (await fetch('/api/sources')).json();
+  document.getElementById('sources').innerHTML = sourcesBlock(sources);
+
   document.getElementById('active').innerHTML =
     `<tr><th>platform</th><th>job</th><th>status</th><th>source</th><th>queued</th><th></th></tr>` +
     (d.active.map(j => `<tr>${jobCells(j, j.queued_at)}<td>${j.status === 'queued'
@@ -363,6 +491,58 @@ async function load() {
         (j.error || '').split('\\n').filter(Boolean).pop()?.trim().slice(0, 80) || ''}</td></tr>`).join('')
      || '<tr><td class="empty" colspan="6">nothing yet</td></tr>');
 }
+
+function sourcesBlock(d) {
+  const platforms = Object.entries(d.kinds).filter(([, kinds]) => kinds.length);
+  if (!platforms.length)
+    return '<p class="empty">No platform can archive a source yet.</p>';
+
+  const options = platforms.map(([p]) => `<option value="${p}">${p}</option>`).join('');
+  const rows = d.sources.map(s => `<tr>
+    <td>${s.platform}</td>
+    <td><code>${s.kind}:${s.target}</code></td>
+    <td class="${s.enabled ? 'ok' : 'warn'}">${s.enabled ? 'syncing' : 'paused'}</td>
+    <td>${s.items.toLocaleString()}</td>
+    <td class="hint">${s.last_run || 'never'}</td>
+    <td>
+      <button class="link" onclick="runSource('${s.platform}','${s.kind}','${s.target}',false)">sync</button>
+      <button class="link" onclick="runSource('${s.platform}','${s.kind}','${s.target}',true)">full</button>
+      <button class="link" onclick="toggleSource('${s.platform}','${s.kind}','${s.target}',${!s.enabled})">${
+        s.enabled ? 'pause' : 'resume'}</button>
+      <button class="link" onclick="untrack('${s.platform}','${s.kind}','${s.target}')">untrack</button>
+    </td></tr>`).join('');
+
+  return `<div class="scroll"><table>
+    <tr><th>platform</th><th>source</th><th>state</th><th>items</th><th>last run</th><th></th></tr>
+    ${rows || '<tr><td class="empty" colspan="6">nothing tracked</td></tr>'}
+  </table></div>
+  <section class="block"><h4>Add</h4>
+    <div class="row">
+      <select id="src-platform">${options}</select>
+      <input id="src-target" placeholder="account or subreddit" size="20">
+      <button onclick="addSource()">track</button>
+      <button class="link" onclick="addSource(true)">run once</button>
+    </div>
+    <p class="hint">Tracked sources re-sync on their platform's cycle. Running once archives it
+       now without tracking it.</p>
+  </section>`;
+}
+
+const srcBody = (platform, kind, target) => ({platform, kind, target});
+
+function addSource(once) {
+  const platform = document.getElementById('src-platform').value;
+  const target = document.getElementById('src-target').value.trim();
+  if (!target) return;
+  document.getElementById('src-target').value = '';
+  post(once ? '/api/sources/run' : '/api/sources/add', {platform, target});
+}
+const runSource = (platform, kind, target, full) =>
+  post(`/api/sources/run?full=${full}`, srcBody(platform, kind, target));
+const toggleSource = (platform, kind, target, enabled) =>
+  post(`/api/sources/enabled?enabled=${enabled}`, srcBody(platform, kind, target));
+const untrack = (platform, kind, target) =>
+  post('/api/sources/remove', srcBody(platform, kind, target));
 
 async function post(url, body) {
   busy = true;

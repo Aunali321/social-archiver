@@ -26,10 +26,26 @@ JOB_FLAGS = {
     "archive": ("category", "history", "retry_failed"),
     "upload": ("retry_failed",),
     "embed": ("retry_failed",),
+    # A source job names what to walk; `history` means walk it all again rather than stopping
+    # at the newest item already held.
+    "source": ("target", "history"),
 }
 
 POLL_SECONDS = 2
 SCHEDULE_POLL_SECONDS = 30
+
+
+def source_kinds(platform: str) -> tuple[str, ...]:
+    """Empty for a platform with no fetcher yet, which is what keeps the UI from offering one."""
+    try:
+        module = importlib.import_module(f"social_archiver.platforms.{platform}.sources")
+    except ModuleNotFoundError:
+        return ()
+    fetcher = next(
+        (getattr(module, name) for name in dir(module) if name.endswith("SourceFetcher")),
+        None,
+    )
+    return tuple(getattr(fetcher, "kinds", ()))
 
 
 def categories(platform: str) -> list[str]:
@@ -45,15 +61,18 @@ def next_run() -> datetime:
 async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> list[Job]:
     """Separate rows rather than one bundled run, so a category the API is refusing fails on its
     own instead of marking the whole cycle failed."""
-    plan: list[tuple[str, str | None]] = [("archive", category) for category in schedule.categories]
+    plan: list[tuple[str, str | None, str | None]] = [("archive", category, None) for category in schedule.categories]
+    # Tracked sources sync on the same tick, before uploading, so a cycle's uploads carry
+    # everything it archived rather than leaving source items until the next one.
+    plan += [("source", None, tracked.target) for tracked in await queue.sources(schedule.platform) if tracked.enabled]
     if config.TELEGRAM_BOT_TOKEN:
-        plan.append(("upload", None))
+        plan.append(("upload", None, None))
     if config.EMBEDDING_ENABLED:
-        plan.append(("embed", None))
+        plan.append(("embed", None, None))
 
     queued = []
-    for job, category in plan:
-        if enqueued := await queue.enqueue(schedule.platform, job, category=category, source=source):
+    for job, category, target in plan:
+        if enqueued := await queue.enqueue(schedule.platform, job, category=category, target=target, source=source):
             queued.append(enqueued)
     return queued
 
@@ -69,6 +88,11 @@ async def _invoke(job: Job):
         kwargs["category"] = job.category
     if "retry_failed" in flags:
         kwargs["retry_failed"] = job.retry_failed
+    if "target" in flags:
+        if not job.target:
+            raise ValueError(f"{job.platform} {job.job} job {job.id} has no target to walk")
+        kwargs["target"] = job.target
+        kwargs["full"] = kwargs.pop("fetch_all", False)
     await target(**kwargs)
 
 

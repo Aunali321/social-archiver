@@ -8,6 +8,131 @@ from typing import Self
 
 import aiosqlite
 
+from social_archiver.core import migrations
+
+MIGRATIONS = (
+    (
+        """
+        CREATE TABLE IF NOT EXISTS items (
+                        item_id TEXT PRIMARY KEY,
+                        platform TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        author_username TEXT NOT NULL,
+                        post_url TEXT NOT NULL,
+                        author_id TEXT,
+                        text TEXT,
+                        is_article INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP,
+
+                        has_media INTEGER NOT NULL DEFAULT 0,
+                        media_count INTEGER NOT NULL DEFAULT 0,
+                        media_types TEXT,
+                        media_urls TEXT,
+
+                        -- reply/quote/retweet graph; NULL for platforms without one
+                        conversation_id TEXT,
+                        in_reply_to_status_id TEXT,
+                        quoted_tweet_id TEXT,
+                        retweeted_tweet_id TEXT,
+                        is_retweet INTEGER NOT NULL DEFAULT 0,
+                        origin TEXT,
+                        discovered_via_item_id TEXT,
+                        thread_position TEXT,
+                        has_self_replies INTEGER,
+                        thread_root_id TEXT,
+
+                        reply_count INTEGER,
+                        retweet_count INTEGER,
+                        like_count INTEGER,
+                        quote_count INTEGER,
+                        bookmark_count INTEGER,
+                        view_count INTEGER,
+
+                        collection_name TEXT,
+                        shared_by_username TEXT,
+                        product_type TEXT,
+                        subreddit TEXT,
+                        link_url TEXT,
+
+                        archive_status TEXT NOT NULL DEFAULT 'pending',
+                        upload_status TEXT NOT NULL DEFAULT 'pending',
+                        embed_status TEXT NOT NULL DEFAULT 'pending',
+                        archive_error TEXT,
+                        upload_error TEXT,
+                        embed_error TEXT,
+                        archive_attempts INTEGER NOT NULL DEFAULT 0,
+
+                        local_paths TEXT,
+                        telegram_message_ids TEXT,
+                        vlm_description TEXT,
+
+                        fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        archived_at TIMESTAMP,
+                        uploaded_at TIMESTAMP,
+                        embedded_at TIMESTAMP
+                    )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_items_platform_category ON items(platform, category)",
+        "CREATE INDEX IF NOT EXISTS idx_items_archive_status ON items(platform, archive_status)",
+        "CREATE INDEX IF NOT EXISTS idx_items_upload_status ON items(platform, upload_status)",
+        "CREATE INDEX IF NOT EXISTS idx_items_embed_status ON items(platform, embed_status)",
+        "CREATE INDEX IF NOT EXISTS idx_items_conversation_id ON items(conversation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_items_origin ON items(origin)",
+        "CREATE INDEX IF NOT EXISTS idx_items_author ON items(author_username)",
+        "CREATE INDEX IF NOT EXISTS idx_items_thread_root ON items(thread_root_id)",
+        "CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at)",
+        """
+        -- An item can belong to several categories at once (a post you wrote is also
+                    -- one you upvoted), which items.category alone cannot express: it only records
+                    -- whichever pass inserted the row first.
+                    CREATE TABLE IF NOT EXISTS item_categories (
+                        item_id TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        PRIMARY KEY (item_id, category)
+                    )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_item_categories_category ON item_categories(category)",
+        """
+        -- A saved post can sit in several Instagram collections at once, and can be moved
+                    -- between them later. items.collection_name records only where it was first seen.
+                    CREATE TABLE IF NOT EXISTS item_collections (
+                        item_id TEXT NOT NULL,
+                        collection TEXT NOT NULL,
+                        PRIMARY KEY (item_id, collection)
+                    )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_item_collections_collection ON item_collections(collection)",
+        """
+        -- Where a history walk had got to, so an interrupted one resumes instead of
+                    -- paging from the top again. Only a full backfill writes here.
+                    CREATE TABLE IF NOT EXISTS fetch_cursors (
+                        platform TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        cursor TEXT NOT NULL,
+                        updated_at TIMESTAMP NOT NULL,
+                        PRIMARY KEY (platform, category)
+                    )
+        """,
+        """
+        -- Conversations thread discovery has already walked. Pairs are rederived from the
+                    -- whole archive every run, so without this a repeat run researches what it has.
+                    CREATE TABLE IF NOT EXISTS searched_conversations (
+                        platform TEXT NOT NULL,
+                        author TEXT NOT NULL,
+                        conversation_id TEXT NOT NULL,
+                        searched_at TIMESTAMP NOT NULL,
+                        PRIMARY KEY (platform, author, conversation_id)
+                    )
+        """,
+    ),
+    # Which source pulled a row in. Null for everything the category walks archive, so the
+    # two populations stay distinguishable without reading the category back.
+    (
+        "ALTER TABLE items ADD COLUMN source_target TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_items_source_target ON items(platform, source_target)",
+    ),
+)
+
 
 class ArchiveStatus(StrEnum):
     PENDING = "pending"
@@ -72,7 +197,10 @@ class Item:
 
     # Reddit-specific
     subreddit: str | None = None
-    link_url: str | None = None  # a link post's outbound target, which post_url is not
+    link_url: str | None = None
+
+    # Set when a source walk archived the row, naming which account or subreddit
+    source_target: str | None = None  # a link post's outbound target, which post_url is not
 
     archive_status: ArchiveStatus = ArchiveStatus.PENDING
     upload_status: StageStatus = StageStatus.PENDING
@@ -124,6 +252,7 @@ class Item:
             product_type=row["product_type"],
             subreddit=row["subreddit"],
             link_url=row["link_url"],
+            source_target=row["source_target"],
             archive_status=ArchiveStatus(row["archive_status"]),
             upload_status=StageStatus(row["upload_status"]),
             embed_status=StageStatus(row["embed_status"]),
@@ -166,123 +295,11 @@ class Database:
         self._connection = await aiosqlite.connect(self.db_path)
         self._connection.row_factory = aiosqlite.Row
         await self._connection.execute("PRAGMA journal_mode=WAL")
-        await self._init_schema()
+        await migrations.apply(self._connection, MIGRATIONS, "archive", self.db_path)
 
     async def close(self):
         if self._connection:
             await self._connection.close()
-
-    async def _init_schema(self):
-        await self._connection.executescript("""
-            CREATE TABLE IF NOT EXISTS items (
-                item_id TEXT PRIMARY KEY,
-                platform TEXT NOT NULL,
-                category TEXT NOT NULL,
-                author_username TEXT NOT NULL,
-                post_url TEXT NOT NULL,
-                author_id TEXT,
-                text TEXT,
-                is_article INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP,
-
-                has_media INTEGER NOT NULL DEFAULT 0,
-                media_count INTEGER NOT NULL DEFAULT 0,
-                media_types TEXT,
-                media_urls TEXT,
-
-                -- reply/quote/retweet graph; NULL for platforms without one
-                conversation_id TEXT,
-                in_reply_to_status_id TEXT,
-                quoted_tweet_id TEXT,
-                retweeted_tweet_id TEXT,
-                is_retweet INTEGER NOT NULL DEFAULT 0,
-                origin TEXT,
-                discovered_via_item_id TEXT,
-                thread_position TEXT,
-                has_self_replies INTEGER,
-                thread_root_id TEXT,
-
-                reply_count INTEGER,
-                retweet_count INTEGER,
-                like_count INTEGER,
-                quote_count INTEGER,
-                bookmark_count INTEGER,
-                view_count INTEGER,
-
-                collection_name TEXT,
-                shared_by_username TEXT,
-                product_type TEXT,
-                subreddit TEXT,
-                link_url TEXT,
-
-                archive_status TEXT NOT NULL DEFAULT 'pending',
-                upload_status TEXT NOT NULL DEFAULT 'pending',
-                embed_status TEXT NOT NULL DEFAULT 'pending',
-                archive_error TEXT,
-                upload_error TEXT,
-                embed_error TEXT,
-                archive_attempts INTEGER NOT NULL DEFAULT 0,
-
-                local_paths TEXT,
-                telegram_message_ids TEXT,
-                vlm_description TEXT,
-
-                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                archived_at TIMESTAMP,
-                uploaded_at TIMESTAMP,
-                embedded_at TIMESTAMP
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_items_platform_category ON items(platform, category);
-            CREATE INDEX IF NOT EXISTS idx_items_archive_status ON items(platform, archive_status);
-            CREATE INDEX IF NOT EXISTS idx_items_upload_status ON items(platform, upload_status);
-            CREATE INDEX IF NOT EXISTS idx_items_embed_status ON items(platform, embed_status);
-            CREATE INDEX IF NOT EXISTS idx_items_conversation_id ON items(conversation_id);
-            CREATE INDEX IF NOT EXISTS idx_items_origin ON items(origin);
-            CREATE INDEX IF NOT EXISTS idx_items_author ON items(author_username);
-            CREATE INDEX IF NOT EXISTS idx_items_thread_root ON items(thread_root_id);
-            CREATE INDEX IF NOT EXISTS idx_items_created_at ON items(created_at);
-
-            -- An item can belong to several categories at once (a post you wrote is also
-            -- one you upvoted), which items.category alone cannot express: it only records
-            -- whichever pass inserted the row first.
-            CREATE TABLE IF NOT EXISTS item_categories (
-                item_id TEXT NOT NULL,
-                category TEXT NOT NULL,
-                PRIMARY KEY (item_id, category)
-            );
-            CREATE INDEX IF NOT EXISTS idx_item_categories_category ON item_categories(category);
-
-            -- A saved post can sit in several Instagram collections at once, and can be moved
-            -- between them later. items.collection_name records only where it was first seen.
-            CREATE TABLE IF NOT EXISTS item_collections (
-                item_id TEXT NOT NULL,
-                collection TEXT NOT NULL,
-                PRIMARY KEY (item_id, collection)
-            );
-            CREATE INDEX IF NOT EXISTS idx_item_collections_collection ON item_collections(collection);
-
-            -- Where a history walk had got to, so an interrupted one resumes instead of
-            -- paging from the top again. Only a full backfill writes here.
-            CREATE TABLE IF NOT EXISTS fetch_cursors (
-                platform TEXT NOT NULL,
-                category TEXT NOT NULL,
-                cursor TEXT NOT NULL,
-                updated_at TIMESTAMP NOT NULL,
-                PRIMARY KEY (platform, category)
-            );
-
-            -- Conversations thread discovery has already walked. Pairs are rederived from the
-            -- whole archive every run, so without this a repeat run researches what it has.
-            CREATE TABLE IF NOT EXISTS searched_conversations (
-                platform TEXT NOT NULL,
-                author TEXT NOT NULL,
-                conversation_id TEXT NOT NULL,
-                searched_at TIMESTAMP NOT NULL,
-                PRIMARY KEY (platform, author, conversation_id)
-            );
-        """)
-        await self._connection.commit()
 
     async def get_cursor(self, platform: str, category: str) -> str:
         cursor = await self._connection.execute(
@@ -363,9 +380,7 @@ class Database:
         await self._connection.commit()
 
     async def collections_for(self, item_id: str) -> set[str]:
-        cursor = await self._connection.execute(
-            "SELECT collection FROM item_collections WHERE item_id = ?", (item_id,)
-        )
+        cursor = await self._connection.execute("SELECT collection FROM item_collections WHERE item_id = ?", (item_id,))
         return {row["collection"] for row in await cursor.fetchall()}
 
     async def categories_for(self, item_id: str) -> set[str]:
@@ -612,3 +627,38 @@ class Database:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
+
+    async def newest_source_item(self, platform: str, target: str) -> str | None:
+        """The newest item held for a source, which is where its next walk stops.
+
+        Ids are ordered by time on every platform this archives, so the maximum is the newest.
+        Comparing as integers matters: as text, '99' sorts above '100'."""
+        cursor = await self._connection.execute(
+            """
+            SELECT item_id FROM items
+            WHERE platform = ? AND source_target = ?
+            ORDER BY CAST(item_id AS INTEGER) DESC LIMIT 1
+            """,
+            (platform, target),
+        )
+        row = await cursor.fetchone()
+        return row["item_id"] if row else None
+
+    async def source_item_count(self, platform: str, target: str) -> int:
+        cursor = await self._connection.execute(
+            "SELECT count(*) AS n FROM items WHERE platform = ? AND source_target = ?", (platform, target)
+        )
+        return (await cursor.fetchone())["n"]
+
+    async def attribute_to_source(self, platform: str, item_ids: Iterable[str], target: str):
+        """Name the source for rows that are already archived.
+
+        A tweet liked before its author's profile was walked is already stored under `likes`,
+        and the walk skips it. Without this it would never be attributed to the source at all:
+        the count would understate, and the source could not be listed back. Only fills an
+        empty one, so the first source to claim a row keeps it."""
+        await self._connection.executemany(
+            "UPDATE items SET source_target = ? WHERE item_id = ? AND platform = ? AND source_target IS NULL",
+            [(target, item_id, platform) for item_id in item_ids],
+        )
+        await self._connection.commit()
