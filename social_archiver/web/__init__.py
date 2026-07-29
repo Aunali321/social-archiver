@@ -4,9 +4,11 @@ Enqueues rather than executes. The worker is the only thing that runs a job, so 
 and the UI cannot start the same platform twice — see core.worker.
 """
 
+import asyncio
 import sqlite3
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -118,6 +120,40 @@ def _status(platform: str) -> PlatformStatus:
     return status
 
 
+# Counting an archive means a pass over every row of it, and one of these is millions of rows.
+# Two things follow. It cannot run on the event loop, where a multi-second scan stalls every
+# worker sharing the process — an archive job stops making requests for as long as the scan
+# lasts, which at a poll every few seconds is permanently. And it cannot run per request. So
+# scans happen in a thread, at most one at a time, and the answer is held briefly.
+#
+# Only the archive totals are cached. The queue is read straight from its own small table on
+# every request, so a job's status stays live while its item counts lag by up to a minute.
+_SCAN_TTL = timedelta(seconds=60)
+_scan_lock = asyncio.Lock()
+_platform_scans: dict[str, tuple[datetime, PlatformStatus]] = {}
+_source_scan: tuple[datetime, dict[tuple[str, str], int]] | None = None
+
+
+def _fresh(stamped: tuple[datetime, object] | None) -> bool:
+    return stamped is not None and datetime.now() - stamped[0] < _SCAN_TTL
+
+
+async def _scan_platform(platform: str) -> PlatformStatus:
+    """A copy, because the caller stamps schedule fields onto it that are not the archive's."""
+    async with _scan_lock:
+        if not _fresh(_platform_scans.get(platform)):
+            _platform_scans[platform] = (datetime.now(), await asyncio.to_thread(_status, platform))
+    return replace(_platform_scans[platform][1])
+
+
+async def _scan_sources() -> dict[tuple[str, str], int]:
+    global _source_scan
+    async with _scan_lock:
+        if not _fresh(_source_scan):
+            _source_scan = (datetime.now(), await asyncio.to_thread(_source_counts))
+    return _source_scan[1]
+
+
 def _job_json(job: Job) -> dict:
     return {
         "id": job.id,
@@ -137,7 +173,7 @@ async def status() -> dict:
     schedules = {s.platform: s for s in await queue.schedules()}
     platforms = []
     for platform in PLATFORMS:
-        entry = _status(platform)
+        entry = await _scan_platform(platform)
         if schedule := schedules.get(platform):
             entry.scheduled = schedule.enabled
             entry.scheduled_categories = schedule.categories
@@ -207,7 +243,7 @@ async def list_sources() -> dict:
     """Tracked sources with how much each has actually produced, so a source that is failing
     to fetch is distinguishable from one that simply has not run."""
     tracked = await queue.sources()
-    counts = _source_counts()
+    counts = await _scan_sources()
     return {
         "kinds": {platform: list(source_kinds(platform)) for platform in PLATFORMS},
         "sources": [
