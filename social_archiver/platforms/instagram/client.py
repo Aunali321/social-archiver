@@ -2,16 +2,28 @@ import logging
 
 from instagrapi import Client
 from instagrapi.exceptions import ChallengeRequired
+from requests.adapters import HTTPAdapter
 
 from social_archiver.platforms.instagram import config
 
 logger = logging.getLogger(__name__)
 
 
+class _TimeoutAdapter(HTTPAdapter):
+    """instagrapi's own `request_timeout` is a sleep between calls, not a socket timeout."""
+
+    def send(self, request, **kwargs):
+        kwargs["timeout"] = kwargs.get("timeout") or config.INSTAGRAM_REQUEST_TIMEOUT
+        return super().send(request, **kwargs)
+
+
 class InstagramClient:
     def __init__(self):
         self.client = Client()
         self.client.delay_range = config.INSTAGRAM_DELAY_RANGE
+        for session in (self.client.private, self.client.public):
+            session.mount("http://", _TimeoutAdapter())
+            session.mount("https://", _TimeoutAdapter())
         self._authenticated = False
         self.request_count = 0  # every private API request, for honest cost logging
 

@@ -74,7 +74,13 @@ class ArchiveJob:
         start_cursor = await self.db.get_cursor(PLATFORM, category) if resumable else ""
 
         recorded = known = downloaded = 0
-        for page in self._fetch(category, fetch_all, start_cursor):
+        pages = self._fetch(category, fetch_all, start_cursor)
+        while True:
+            # instagrapi is synchronous, so driving this generator inline blocks the event
+            # loop: one stalled request stops every platform, not just Instagram.
+            page = await asyncio.to_thread(next, pages, None)
+            if page is None:
+                break
             # Before the dedupe below, so a post moved between collections is still recorded
             # against the one it is in now. Only `saved` carries a collection.
             if memberships := [(m.pk, m.collection_name) for m in page.media if m.collection_name]:

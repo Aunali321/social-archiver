@@ -26,7 +26,7 @@ MILVUS_COLLECTIONS = {"likes": "instagram_likes", "saved": "instagram_saved", "s
 async def archive(fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
     config.validate_archive()
     ig_client = InstagramClient()
-    ig_client.login()
+    await asyncio.to_thread(ig_client.login)
     async with Database(config.DATABASE_PATH) as db:
         tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
         await ArchiveJob(ig_client, db, PORT, tg).run(fetch_all, category, retry_failed)
