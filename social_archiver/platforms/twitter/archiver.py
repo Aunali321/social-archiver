@@ -220,6 +220,13 @@ class ArchiveJob:
                 raise
 
     async def _record_new_tweets(self, category: Category, fetch_all: bool):
+        # Export before timeline. The export is a static snapshot of every like ever; the
+        # timeline is a sliding 600-page window that only reaches the recent end. Running it
+        # last meant it never ran at all, since a full timeline pass takes days and something
+        # always interrupted it first. The pass that follows is not repeated work: a
+        # conversation this already walked is stamped, so the timeline skips searching it.
+        await self._backfill_from_export(category)
+
         known_ids = None if fetch_all else await self.db.ids_by_origin(PLATFORM, category.seed_origin)
         if known_ids is not None:
             logger.info(f"Cursor-based sync: {len(known_ids)} known {category.seed_origin} tweets")
@@ -229,8 +236,6 @@ class ArchiveJob:
             await self._expand_in_chunks(category, seeds)
         else:
             logger.info(f"No new {category.name} from the timeline")
-
-        await self._backfill_from_export(category)
 
     async def _expand_in_chunks(self, category: Category, seeds: list[dict[str, Any]]):
         """Expand a chunk at a time, committing each before the next. A full timeline walk reaches
