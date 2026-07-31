@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from social_archiver.platforms.twitter.client import TwitterClient
+from social_archiver.platforms.twitter.client import TwitterClient, is_rate_limit
 from social_archiver.platforms.twitter.simple_tweet import SimpleTweet
 
 logger = logging.getLogger(__name__)
@@ -46,11 +46,6 @@ TOMBSTONE_REASON_BATCH = "unavailable, no reason given (deleted, or withheld fro
 
 def datetime_min() -> datetime:
     return datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _is_rate_limit(e: Exception) -> bool:
-    msg = str(e).lower()
-    return "429" in msg or "rate" in msg
 
 
 def _refs_of(tweet: dict[str, Any]) -> list[str]:
@@ -280,11 +275,18 @@ class TweetExpander:
         pairs, fallback_convs = self._pending_pairs()
 
         found: list[dict[str, Any]] = []
+        walked: set[tuple[str, str]] = set()
         if pairs:
             logger.info(f"Searching {len(pairs)} (author, conversation) pairs for thread tweets")
-            found = await self.tw_client.get_conversation_author_tweets(pairs, page_delay=self.page_delay)
+            found, walked = await self.tw_client.get_conversation_author_tweets(pairs, page_delay=self.page_delay)
+            if skipped := len(pairs) - len(walked):
+                logger.warning(f"{skipped} conversations left unsearched this round; a later run retries them")
+            # Asked once either way, or the failed ones regenerate every round until
+            # MAX_ITERATIONS. Only the ones that answered are persisted as searched: a
+            # stamped pair is skipped for SEARCH_REFRESH days, which would turn a transient
+            # failure into a permanent gap.
             self._searched_pairs.update(pairs)
-            self._newly_searched.update(pairs)
+            self._newly_searched.update(walked)
             for tweet in found:
                 self._ingest(tweet)
                 self._thread_found.add(tweet["id"])
@@ -292,7 +294,7 @@ class TweetExpander:
         # search index gap detection: each searched pair must at least return the
         # tweet that generated it — if not, fetch that conversation via TweetDetail
         found_pairs = {(t.get("author_username"), t.get("conversation_id")) for t in found}
-        for author, conv in pairs:
+        for author, conv in walked:
             if (author, conv) not in found_pairs and conv not in self._detail_fetched:
                 focal = next(
                     (
@@ -328,7 +330,7 @@ class TweetExpander:
         try:
             result = await self.tw_client.get_thread(focal_tweet_id, page_delay=self.page_delay)
         except Exception as e:
-            if _is_rate_limit(e):
+            if is_rate_limit(e):
                 raise
             logger.error(f"TweetDetail fallback failed for conversation {conversation_id}: {e}")
             return

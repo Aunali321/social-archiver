@@ -10,7 +10,7 @@ from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import download_pending
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.platforms.twitter import config
-from social_archiver.platforms.twitter.client import TwitterClient
+from social_archiver.platforms.twitter.client import TwitterClient, is_rate_limit
 from social_archiver.platforms.twitter.expander import TOMBSTONE_REASON_BATCH, TweetExpander
 from social_archiver.platforms.twitter.fetchers.export import parse_like_export
 from social_archiver.platforms.twitter.port import PLATFORM, TwitterPort
@@ -207,7 +207,7 @@ class ArchiveJob:
                 await self._record_new_tweets(category, fetch_all)
                 return
             except Exception as e:
-                if _is_rate_limit(e) and attempt < FETCH_ATTEMPTS:
+                if is_rate_limit(e) and attempt < FETCH_ATTEMPTS:
                     logger.warning(f"Rate limited (attempt {attempt}/{FETCH_ATTEMPTS}); waiting {delay:.0f}s")
                     await asyncio.sleep(delay)
                     delay = min(delay * 1.5, MAX_RETRY_DELAY)
@@ -292,8 +292,3 @@ class ArchiveJob:
             chunk = queued[: config.TWITTER_EXPAND_BATCH]
             logger.info(f"Export backfill: expanding {len(chunk)} likes ({len(queued) - len(chunk)} still queued)")
             await self._expand_and_record(category, chunk)
-
-
-def _is_rate_limit(error: Exception) -> bool:
-    message = str(error).lower()
-    return "429" in message or "rate" in message

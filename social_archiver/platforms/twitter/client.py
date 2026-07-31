@@ -629,25 +629,48 @@ class TwitterClient:
 
     async def get_conversation_author_tweets(
         self, pairs: list[tuple[str, str]], page_delay: float = 1.5
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], set[tuple[str, str]]]:
         """Fetch all tweets each author posted in their conversation, one conversation per query.
 
         A query's results are capped well under what a busy conversation can hold, and the cap is
         spent by the whole query, so OR-batching several conversations into one silently drops
         whatever did not fit. One conversation per query is the only shape that cannot lose them.
-        Protected authors are invisible to search whatever the shape."""
+        Protected authors are invisible to search whatever the shape.
+
+        Returns the tweets found and the pairs actually walked. A conversation the network
+        refused was not searched, and the caller must not stamp it as searched."""
         all_tweets: list[dict[str, Any]] = []
         seen: set[str] = set()
+        walked: set[tuple[str, str]] = set()
+        attempted = 0
+        last_error: Exception | None = None
 
         for i, (author, conv) in enumerate(dict.fromkeys(pairs)):
             if i > 0 and page_delay > 0:
                 await asyncio.sleep(page_delay)
-            for tweet in await self._walk_conversation(author, conv, page_delay):
+            attempted += 1
+            try:
+                tweets = await self._walk_conversation(author, conv, page_delay)
+            except Exception as e:
+                # One conversation is one query. A transport failure on it says nothing about
+                # the rest, and letting it out discards every seed the chunk had left.
+                if is_rate_limit(e):
+                    raise
+                logger.error(f"Conversation walk failed for (@{author}, {conv}): {e}")
+                last_error = e
+                continue
+            walked.add((author, conv))
+            for tweet in tweets:
                 if tweet["id"] not in seen:
                     seen.add(tweet["id"])
                     all_tweets.append(tweet)
 
-        return all_tweets
+        # Nothing walking at all is the network being gone rather than a bad conversation.
+        # That belongs to the caller's backoff, not to a chunk committed as if it had run.
+        if attempted and not walked:
+            raise last_error
+
+        return all_tweets, walked
 
     async def _walk_conversation(self, author: str, conv: str, page_delay: float) -> list[dict[str, Any]]:
         """Walk one conversation to exhaustion.
@@ -880,6 +903,13 @@ class TwitterClient:
         except Exception as e:
             logger.error(f"Credential verification failed: {e}")
             return False
+
+
+def is_rate_limit(e: Exception) -> bool:
+    """A 429 survives to the caller as text, since every request path reports its failure
+    as a message rather than a type. Callers back off on it instead of skipping past it."""
+    msg = str(e).lower()
+    return "429" in msg or "rate" in msg
 
 
 # =============================================================================
