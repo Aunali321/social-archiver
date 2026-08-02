@@ -116,6 +116,9 @@ def _link_media(message: WhatsAppMessage, item: Item, folder: Path) -> list[Path
             try:
                 os.link(media.path, target)
             except OSError:
-                shutil.copy2(media.path, target)
+                # Across filesystems the file is copied instead. Data only: replaying the
+                # source's permissions onto an ACL-restricted dataset is refused, and the
+                # archive has no use for them anyway.
+                shutil.copyfile(media.path, target)
         paths.append(target)
     return paths
