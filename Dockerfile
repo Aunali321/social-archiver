@@ -10,7 +10,15 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Stage 2: runtime
+# Stage 2: the WhatsApp bridge, a Go daemon the archiver supervises when
+# WHATSAPP_BRIDGE_DIR is set
+FROM golang:1.26-bookworm AS bridge
+
+WORKDIR /src
+COPY wabridge/ ./
+RUN go build -o /wabridge .
+
+# Stage 3: runtime
 FROM python:3.13-slim
 
 # yt-dlp muxes with ffmpeg; without it every video download fails at the last step
@@ -20,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
+COPY --from=bridge /wabridge /usr/local/bin/wabridge
 COPY social_archiver ./social_archiver
 COPY scripts ./scripts
 

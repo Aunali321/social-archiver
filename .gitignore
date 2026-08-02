@@ -46,6 +46,9 @@ Thumbs.db
 
 reference/
 
+# Compiled bridge binary (built by CI/Docker/the sidecar, never committed)
+wabridge/wabridge
+
 # Test fixtures/output
 test_vlm_media/
 test_thread_captions_output.json
