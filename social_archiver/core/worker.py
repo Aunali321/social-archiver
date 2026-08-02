@@ -19,7 +19,7 @@ from social_archiver.core.queue import Job, JobQueue, Schedule
 
 logger = logging.getLogger(__name__)
 
-PLATFORMS = ("instagram", "reddit", "twitter")
+PLATFORMS = ("instagram", "reddit", "twitter", "whatsapp")
 
 # Which flags each job accepts, mirroring core.cli.build_parser
 JOB_FLAGS = {
@@ -52,6 +52,26 @@ def categories(platform: str) -> list[str]:
     archiver = importlib.import_module(f"social_archiver.platforms.{platform}.archiver")
     # Twitter models a category as an object pairing its name with a seed origin
     return [getattr(c, "name", c) for c in archiver.CATEGORIES]
+
+
+def sidecar_module(platform: str):
+    """The platform's sidecar: a long-lived companion run alongside its worker, exposing
+    `run()`, `status()` and the pairing hooks — the WhatsApp bridge. None for a platform
+    without one, which is every other platform."""
+    try:
+        return importlib.import_module(f"social_archiver.platforms.{platform}.sidecar")
+    except ModuleNotFoundError:
+        return None
+
+
+def sidecar(platform: str):
+    module = sidecar_module(platform)
+    return module.run if module else None
+
+
+def sidecar_status(platform: str) -> str | None:
+    module = sidecar_module(platform)
+    return module.status() if module else None
 
 
 def next_run() -> datetime:
@@ -163,6 +183,7 @@ async def running(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
     await queue.connect()
     await seed_schedules(queue)
     tasks = [asyncio.create_task(worker(queue, platform)) for platform in platforms]
+    tasks += [asyncio.create_task(run()) for platform in platforms if (run := sidecar(platform)) is not None]
     tasks.append(asyncio.create_task(scheduler(queue, platforms)))
     try:
         yield

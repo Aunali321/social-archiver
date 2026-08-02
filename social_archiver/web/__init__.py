@@ -24,6 +24,8 @@ from social_archiver.core.worker import (
     enqueue_cycle,
     next_run,
     running,
+    sidecar_module,
+    sidecar_status,
     source_kinds,
 )
 
@@ -51,6 +53,7 @@ class PlatformStatus:
     scheduled: bool = False
     scheduled_categories: list[str] = field(default_factory=list)
     next_run: str | None = None
+    sidecar: str | None = None
     error: str | None = None
 
 
@@ -101,6 +104,7 @@ def _counts(db: sqlite3.Connection, column: str) -> dict[str, int]:
 
 def _status(platform: str) -> PlatformStatus:
     status = PlatformStatus(platform=platform, categories=categories(platform))
+    status.sidecar = sidecar_status(platform)
     path = config.DATA_DIR / f"{platform}.db"
     if not path.exists():
         status.error = "nothing archived yet"
@@ -221,6 +225,23 @@ async def cycle(platform: str) -> dict[str, str]:
     if not queued:
         return {"error": f"nothing to queue for {platform}: no categories scheduled, or already queued"}
     return {"started": f"queued {len(queued)} job(s) for the {platform} cycle"}
+
+
+@app.post("/api/pair/{platform}")
+async def start_pairing(platform: str) -> dict[str, str]:
+    module = sidecar_module(platform)
+    if module is None:
+        return {"error": f"{platform} has nothing to pair"}
+    error = await module.pair_start()
+    return {"error": error} if error else {"started": "pairing"}
+
+
+@app.get("/api/pair/{platform}")
+async def pairing_state(platform: str) -> dict:
+    module = sidecar_module(platform)
+    if module is None:
+        return {"error": f"{platform} has nothing to pair"}
+    return module.pair_state()
 
 
 @app.post("/api/schedule")
@@ -413,6 +434,16 @@ INDEX = """<!doctype html>
  td.err { color:var(--bad); font-family:ui-monospace,monospace; font-size:.76rem }
  .empty, td.empty { color:var(--dim); font-style:italic; text-transform:none }
  .scroll { overflow-x:auto }
+
+ #pair-overlay { position:fixed; inset:0; background:rgb(0 0 0 / .55); display:flex;
+                 align-items:center; justify-content:center; z-index:10 }
+ #pair-overlay[hidden] { display:none }
+ .pair-box { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+             padding:var(--s3); max-width:min(92vw,34rem); text-align:center }
+ /* The QR stays black-on-white in both themes; an inverted code scans unreliably */
+ .pair-box pre { display:inline-block; background:#fff; color:#000; padding:var(--s2);
+                 border-radius:6px; font:8px/1 ui-monospace,monospace; text-align:left;
+                 overflow:auto; max-width:86vw; margin:var(--s2) 0 }
 </style>
 <main>
 <header>
@@ -433,6 +464,12 @@ INDEX = """<!doctype html>
 <h2>History</h2>
 <div class="scroll"><table id="recent"></table></div>
 </main>
+<div id="pair-overlay" hidden>
+  <div class="pair-box">
+    <div id="pair-body"></div>
+    <button onclick="closePair()">Close</button>
+  </div>
+</div>
 <script>
 const FLAGS = {archive:['category','history','retry_failed'], upload:['retry_failed'], embed:['retry_failed']};
 // source jobs are driven from the Sources section, not the per-platform cards
@@ -477,10 +514,15 @@ function jobRow(p, job) {
 }
 
 function card(p) {
+  const bridge = p.sidecar
+    ? `<dt>bridge</dt><dd>${p.sidecar}${p.sidecar === 'not paired'
+        ? ` <button onclick="pair('${p.platform}')">Pair</button>` : ''}</dd>`
+    : '';
   const stats = p.error
-    ? `<p class="empty">${p.error}</p>`
+    ? `<p class="empty">${p.error}</p>${bridge ? `<dl class="stats">${bridge}</dl>` : ''}`
     : `<dl class="stats"><dt>items</dt><dd>${p.total.toLocaleString()}</dd>
        ${stat('archive', p.archive)}${stat('upload', p.upload)}${stat('embed', p.embed)}
+       ${bridge}
        ${p.resumable.length ? `<dt>resumable walk</dt><dd class="warn">${p.resumable.join(', ')}</dd>` : ''}</dl>`;
   return `<article class="card">
     <div class="card-head"><h3>${p.platform}</h3>
@@ -495,6 +537,27 @@ function card(p) {
         <button class="primary" onclick="runCycle('${p.platform}')">Queue</button></div>
     </section></article>`;
 }
+
+let pairTimer = null;
+async function pair(platform) {
+  document.getElementById('pair-overlay').hidden = false;
+  document.getElementById('pair-body').innerHTML = '<p class="empty">starting…</p>';
+  const res = await fetch(`/api/pair/${platform}`, {method: 'POST'}).then(r => r.json());
+  if (res.error) { document.getElementById('pair-body').innerHTML = `<p class="bad">${res.error}</p>`; return; }
+  pollPair(platform);
+}
+
+async function pollPair(platform) {
+  const body = document.getElementById('pair-body');
+  const s = await fetch(`/api/pair/${platform}`).then(r => r.json());
+  if (s.paired) { body.innerHTML = '<p class="ok">paired; the bridge starts syncing on its own</p>'; return; }
+  if (s.qr) body.innerHTML = `<pre>${s.qr}</pre><p class="empty">WhatsApp &gt; Linked devices &gt; Link a device</p>`;
+  else if (s.pairing) body.innerHTML = '<p class="empty">requesting a QR from WhatsApp…</p>';
+  else { body.innerHTML = '<p class="bad">pairing stopped; close and retry</p>'; return; }
+  pairTimer = setTimeout(() => pollPair(platform), 2000);
+}
+
+function closePair() { clearTimeout(pairTimer); document.getElementById('pair-overlay').hidden = true; load(); }
 
 const jobCells = (j, when) =>
   `<td>${j.platform}</td><td>${j.job}${j.flags ? ' ' + j.flags : ''}</td>
