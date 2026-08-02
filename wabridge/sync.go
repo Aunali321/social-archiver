@@ -21,6 +21,7 @@ type bridge struct {
 	store     *Store
 	media     *mediaPool
 	refreshed bool
+	historyMu sync.Mutex
 	loggedOut chan struct{}
 	once      sync.Once
 }
@@ -88,7 +89,14 @@ func (b *bridge) handle(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
 		if notif := v.Message.GetProtocolMessage().GetHistorySyncNotification(); notif != nil {
-			b.historyNotification(notif)
+			// Off the event loop: a payload holds thousands of messages, and every live
+			// message delivered after it would otherwise wait in line behind the ingest.
+			// The mutex keeps payloads ordered among themselves.
+			go func() {
+				b.historyMu.Lock()
+				defer b.historyMu.Unlock()
+				b.historyNotification(notif)
+			}()
 			return
 		}
 		b.storeMessage(v)
@@ -220,16 +228,19 @@ func (b *bridge) storeMessage(evt *events.Message) bool {
 
 // recordChat keeps the chats table current enough for the archiver to name conversations:
 // a DM is named after its contact, a group after its subject, fetched once when unknown.
+// The known-name check reads the chats table itself — checking anywhere else re-fetches
+// the group over the network for every message, which is what once ground ingest to ~2
+// messages a second.
 func (b *bridge) recordChat(chat types.JID, kind, senderName string) {
+	if b.store.ChatName(chat.String()) != "" {
+		return
+	}
 	if kind == "dm" {
 		name := b.store.ContactName(chat.String())
 		if name == "" {
 			name = senderName
 		}
 		_ = b.store.UpsertChat(chat.String(), kind, name)
-		return
-	}
-	if b.store.ContactName(chat.String()) != "" {
 		return
 	}
 	var name string

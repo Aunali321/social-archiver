@@ -124,6 +124,12 @@ func (s *Store) ContactName(jid string) string {
 	return name
 }
 
+func (s *Store) ChatName(jid string) string {
+	var name string
+	_ = s.db.QueryRow("SELECT name FROM chats WHERE jid = ? AND name != ''", jid).Scan(&name)
+	return name
+}
+
 // Insert reports whether the row is new. Re-deliveries (history sync repeating a live
 // message) are dropped rather than merged: both carry the same content.
 func (s *Store) Insert(m *StoredMessage) (bool, error) {
