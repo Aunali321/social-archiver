@@ -37,6 +37,11 @@ type Parsed struct {
 	Ephemeral bool
 	Edited    bool
 	Revoke    bool // marks the target (Chat, ID) revoked rather than inserting a row
+
+	// A view-once media envelope recovered from this message's quoted context. The server
+	// withholds view-once payloads from linked devices, but a reply's quote is built by the
+	// replying phone inside the E2E payload, and the original envelope can ride along.
+	QuotedViewOnce *ParsedMedia
 }
 
 // ParseEvent walks the proto for live and history events alike — history WebMessageInfos
@@ -138,12 +143,20 @@ func applyContext(ctx *waE2E.ContextInfo, p *Parsed) {
 	if ctx.GetStanzaID() != "" {
 		p.QuotedID = ctx.GetStanzaID()
 	}
+	if quoted := ctx.GetQuotedMessage(); quoted != nil {
+		inner := &Parsed{}
+		extract(quoted, inner)
+		if inner.ViewOnce && inner.Media != nil && inner.Media.DirectPath != "" {
+			p.QuotedViewOnce = inner.Media
+		}
+	}
 }
 
 func extractMedia(m *waE2E.Message, p *Parsed) {
 	if img := m.GetImageMessage(); img != nil {
 		p.setMedia("image", img.GetCaption(), img.GetMimetype(), img.GetDirectPath(),
 			img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength())
+		p.ViewOnce = p.ViewOnce || img.GetViewOnce()
 		applyContext(img.GetContextInfo(), p)
 	}
 	if vid := m.GetVideoMessage(); vid != nil {
@@ -153,11 +166,13 @@ func extractMedia(m *waE2E.Message, p *Parsed) {
 		}
 		p.setMedia(kind, vid.GetCaption(), vid.GetMimetype(), vid.GetDirectPath(),
 			vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength())
+		p.ViewOnce = p.ViewOnce || vid.GetViewOnce()
 		applyContext(vid.GetContextInfo(), p)
 	}
 	if aud := m.GetAudioMessage(); aud != nil {
 		p.setMedia("audio", "", aud.GetMimetype(), aud.GetDirectPath(),
 			aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength())
+		p.ViewOnce = p.ViewOnce || aud.GetViewOnce()
 		applyContext(aud.GetContextInfo(), p)
 	}
 	if doc := m.GetDocumentMessage(); doc != nil {

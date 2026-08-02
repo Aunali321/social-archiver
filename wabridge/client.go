@@ -36,7 +36,11 @@ func newClient(ctx context.Context, storeDir string) (*whatsmeow.Client, error) 
 	} else if err != nil {
 		return nil, fmt.Errorf("load device: %w", err)
 	}
-	return whatsmeow.NewClient(device, waLog.Stdout("client", "WARN", true)), nil
+	level := os.Getenv("WABRIDGE_LOG")
+	if level == "" {
+		level = "WARN"
+	}
+	return whatsmeow.NewClient(device, waLog.Stdout("client", level, true)), nil
 }
 
 // pairLoop drives the QR channel until pairing completes: QR by default (rendered to the

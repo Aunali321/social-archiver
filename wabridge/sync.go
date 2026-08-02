@@ -102,6 +102,14 @@ func (b *bridge) handle(evt any) {
 		b.storeMessage(v)
 	case *events.HistorySync:
 		b.ingestHistory(v.Data)
+	case *events.UndecryptableMessage:
+		if v.UnavailableType == events.UnavailableTypeViewOnce {
+			chat := b.canonical(v.Info.Chat)
+			sender := b.canonical(v.Info.Sender)
+			_ = b.store.RecordStub(chat.String(), v.Info.ID, sender.String(),
+				b.store.ContactName(sender.String()), v.Info.Timestamp.Unix(), "view_once")
+			log.Printf("view-once stub recorded from %s; reply to it on the phone to recover the media", sender)
+		}
 	case *events.Connected:
 		log.Printf("connected")
 		if !b.refreshed {
@@ -223,7 +231,33 @@ func (b *bridge) storeMessage(evt *events.Message) bool {
 			FileLength: p.Media.FileLength,
 		})
 	}
+	if p.QuotedViewOnce != nil && p.QuotedID != "" {
+		b.recoverViewOnce(chat, p)
+	}
 	return inserted
+}
+
+// recoverViewOnce archives a view-once whose envelope arrived embedded in a reply's quote:
+// the one path that reaches linked devices, since the replying phone builds the quote
+// inside the E2E payload where the server cannot strip it.
+func (b *bridge) recoverViewOnce(chat types.JID, p *Parsed) {
+	media := p.QuotedViewOnce
+	sender := ""
+	if !p.FromMe {
+		sender = b.canonical(p.Sender).String()
+	}
+	if err := b.store.AttachViewOnceMedia(chat.String(), p.QuotedID, sender,
+		b.store.ContactName(sender), p.Ts.Unix(), media); err != nil {
+		log.Printf("attach view-once envelope %s/%s: %v", chat, p.QuotedID, err)
+		return
+	}
+	log.Printf("view-once envelope recovered from a quote in %s; downloading", chat)
+	b.media.Enqueue(MediaJob{
+		ChatJID: chat.String(), MsgID: p.QuotedID,
+		MediaType: media.Type, MimeType: media.MimeType, DirectPath: media.DirectPath,
+		MediaKey: media.MediaKey, FileSHA: media.FileSHA256, FileEncSHA: media.FileEncSHA256,
+		FileLength: media.FileLength,
+	})
 }
 
 // recordChat keeps the chats table current enough for the archiver to name conversations:

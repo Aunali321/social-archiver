@@ -162,6 +162,44 @@ func (s *Store) Insert(m *StoredMessage) (bool, error) {
 	return rows > 0, err
 }
 
+// AttachViewOnceMedia writes a recovered view-once envelope onto the original message's
+// row, creating a placeholder row when the original was never stored (the server delivers
+// view-once to companions as an empty stub). Never overwrites an envelope already held.
+func (s *Store) AttachViewOnceMedia(chatJID, msgID, senderJID, senderName string, ts int64, media *ParsedMedia) error {
+	_, err := s.db.Exec(`
+		INSERT INTO messages (chat_jid, msg_id, sender_jid, sender_name, from_me, ts, text,
+			media_type, mime_type, direct_path, media_key, file_sha256, file_enc_sha256, file_length, view_once)
+		VALUES (?, ?, ?, ?, 0, ?, '', ?, ?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(chat_jid, msg_id) DO UPDATE SET
+			media_type = excluded.media_type, mime_type = excluded.mime_type,
+			direct_path = excluded.direct_path, media_key = excluded.media_key,
+			file_sha256 = excluded.file_sha256, file_enc_sha256 = excluded.file_enc_sha256,
+			file_length = excluded.file_length, view_once = 1, media_error = NULL
+		WHERE direct_path IS NULL`,
+		chatJID, msgID, senderJID, senderName, ts, media.Type, media.MimeType, media.DirectPath,
+		media.MediaKey, media.FileSHA256, media.FileEncSHA256, media.FileLength)
+	return err
+}
+
+// RecordStub keeps a trace of a message whose content the server withheld from this device,
+// which is how view-once arrives at every linked device.
+func (s *Store) RecordStub(chatJID, msgID, senderJID, senderName string, ts int64, kind string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO messages (chat_jid, msg_id, sender_jid, sender_name, from_me, ts, text, view_once)
+		VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+		ON CONFLICT(chat_jid, msg_id) DO NOTHING`,
+		chatJID, msgID, senderJID, senderName, ts,
+		"["+kind+": content withheld by WhatsApp from linked devices]", boolInt(kind == "view_once"))
+	return err
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // MarkRevoked keeps the content: the archive exists to outlive deletions. The flag records
 // that WhatsApp no longer shows the message.
 func (s *Store) MarkRevoked(chatJID, msgID string) error {
