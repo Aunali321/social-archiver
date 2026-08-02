@@ -153,7 +153,13 @@ func (b *bridge) ingestHistory(data *waHistorySync.HistorySync) {
 func (b *bridge) storeMessage(evt *events.Message) bool {
 	p := ParseEvent(evt)
 	chat := b.canonical(p.Chat)
-	if chat.Server != types.DefaultUserServer && chat.Server != types.GroupServer {
+	switch chat.Server {
+	case types.DefaultUserServer, types.GroupServer:
+	case types.HiddenUserServer:
+		// A LID chat whose phone-number mapping is not known yet, which is every chat in
+		// the minutes after pairing. Still a DM; stored under the lid rather than dropped,
+		// and rows land under the number once the mapping exists.
+	default:
 		return false // status broadcasts, broadcast lists, newsletters
 	}
 

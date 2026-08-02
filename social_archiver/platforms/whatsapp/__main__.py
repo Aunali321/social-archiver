@@ -32,6 +32,11 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
 
 
 async def upload(retry_failed: bool = False):
+    if not config.TELEGRAM_CHAT_DM:
+        # Upload is deliberately unconfigured for private chats; a cycle enqueues this job
+        # whenever the shared bot token exists, and nothing-to-do is not a failure.
+        logger.info("No WHATSAPP_CHAT_DM configured; nothing to upload")
+        return
     config.validate_upload()
     async with Database(config.DATABASE_PATH) as db:
         await UploadJob(db, TelegramClient(), PORT).run(retry_failed)
