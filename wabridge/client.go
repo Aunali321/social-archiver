@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,26 +39,13 @@ func newClient(ctx context.Context, storeDir string) (*whatsmeow.Client, error) 
 	return whatsmeow.NewClient(device, waLog.Stdout("client", "WARN", true)), nil
 }
 
-// auth pairs as a companion device: QR by default, a pairing code when a phone number is
-// given. The QR channel must be opened before connecting. When qrFile is set, each rotating
-// QR is also written there as plain text, which is how the web UI shows it.
-func auth(ctx context.Context, cli *whatsmeow.Client, phone, qrFile string) error {
-	if cli.Store.ID != nil {
-		fmt.Printf("already paired as %s\n", cli.Store.ID)
-		return nil
-	}
-	qrChan, err := cli.GetQRChannel(ctx)
-	if err != nil {
-		return err
-	}
-	if err := cli.Connect(); err != nil {
-		return err
-	}
-	defer cli.Disconnect()
+// pairLoop drives the QR channel until pairing completes: QR by default (rendered to the
+// terminal and, when qrFile is set, written there as plain text for the web UI), a pairing
+// code when a phone number is given. The caller's connection stays up on success.
+func pairLoop(ctx context.Context, cli *whatsmeow.Client, qrChan <-chan whatsmeow.QRChannelItem, phone, qrFile string) error {
 	if qrFile != "" {
 		defer os.Remove(qrFile)
 	}
-
 	codeRequested := false
 	for evt := range qrChan {
 		switch {
@@ -80,7 +68,7 @@ func auth(ctx context.Context, cli *whatsmeow.Client, phone, qrFile string) erro
 				fmt.Println("scan with WhatsApp: Settings > Linked Devices > Link a Device")
 			}
 		case evt.Event == whatsmeow.QRChannelSuccess.Event:
-			fmt.Printf("paired as %s\n", cli.Store.ID)
+			log.Printf("paired as %s", cli.Store.ID)
 			return nil
 		case evt.Event == whatsmeow.QRChannelEventError:
 			return fmt.Errorf("pairing failed: %w", evt.Error)

@@ -21,7 +21,7 @@ from social_archiver.platforms.whatsapp import config
 
 logger = logging.getLogger(__name__)
 
-_IDLE_POLL = 15
+_IDLE_POLL = 5
 _RESTART_DELAY = 30
 # An exit this quick is configuration (bad store, invalidated session), not weather, so the
 # retry is slow rather than a hot loop.
@@ -31,33 +31,49 @@ _FATAL_DELAY = 600
 _SOURCE_DIR = Path(__file__).resolve().parents[3] / "wabridge"
 _LOG_NAME = "wabridge.log"
 
-_pairing: asyncio.subprocess.Process | None = None
+_pair_requested = asyncio.Event()
+_child: asyncio.subprocess.Process | None = None
+_child_pairing = False
 
 
 async def run():
+    global _child, _child_pairing
     with (config.LOGS_DIR / _LOG_NAME).open("ab") as log:
         clock = asyncio.get_running_loop().time
         while True:
-            if not _paired():
+            pairing = not _paired() and _pair_requested.is_set()
+            if not (_paired() or pairing):
                 await asyncio.sleep(_IDLE_POLL)
                 continue
             binary = await _ensure_binary(log)
             if binary is None:
-                logger.error("bridge is paired but there is no wabridge binary and no Go toolchain to build one")
+                logger.error("no wabridge binary and no Go toolchain to build one")
                 await asyncio.sleep(_FATAL_DELAY)
                 continue
 
+            args = [binary, "-store", str(config.BRIDGE_DIR)]
+            if pairing:
+                # The same process pairs and then keeps running as the sync: a pair-then-exit
+                # handoff loses the link (the phone rolls back a device that disconnects
+                # right after scanning) and the history push that follows it.
+                _pair_requested.clear()
+                _qr_file().unlink(missing_ok=True)
+                args += ["-pair", "-qr-file", str(_qr_file())]
+            args.append("sync")
+
             started = clock()
-            process = await asyncio.create_subprocess_exec(
-                binary, "-store", str(config.BRIDGE_DIR), "sync", stdout=log, stderr=log
-            )
-            logger.info(f"wabridge sync running (pid {process.pid}), logging to {_LOG_NAME}")
+            _child = await asyncio.create_subprocess_exec(*args, stdout=log, stderr=log)
+            _child_pairing = pairing
+            logger.info(f"wabridge sync running (pid {_child.pid}{', pairing' if pairing else ''})")
             try:
-                code = await process.wait()
+                code = await _child.wait()
             except asyncio.CancelledError:
-                process.terminate()
-                await process.wait()
+                _child.terminate()
+                await _child.wait()
                 raise
+            if pairing and not _paired():
+                logger.warning(f"pairing ended without success (exit {code}); press Pair to retry")
+                continue
             delay = _FATAL_DELAY if clock() - started < _FATAL_EXIT_SECONDS else _RESTART_DELAY
             logger.warning(f"wabridge sync exited with code {code}; restarting in {delay}s")
             await asyncio.sleep(delay)
@@ -86,32 +102,26 @@ def status() -> str | None:
 
 
 async def pair_start() -> str | None:
-    """Begin pairing: run `wabridge auth` with the QR mirrored to a file. Returns an error
-    message, or None when pairing is underway (or already was)."""
-    global _pairing
+    """Ask the supervisor to start a pairing sync. Returns an error message, or None when
+    pairing is underway (or already was)."""
     if _paired():
         return "already paired"
-    if _pairing is not None and _pairing.returncode is None:
-        return None
-
     with (config.LOGS_DIR / _LOG_NAME).open("ab") as log:
-        binary = await _ensure_binary(log)
-        if binary is None:
+        if await _ensure_binary(log) is None:
             return "no wabridge binary and no Go toolchain to build one"
-        _qr_file().unlink(missing_ok=True)
-        _pairing = await asyncio.create_subprocess_exec(
-            binary, "-store", str(config.BRIDGE_DIR), "-qr-file", str(_qr_file()), "auth", stdout=log, stderr=log
-        )
+    _pair_requested.set()
     return None
 
 
 def pair_state() -> dict:
-    """What the pairing overlay polls: the current QR text while auth runs, and whether the
-    session ended up paired. The sync loop notices a fresh pairing by itself."""
+    """What the pairing overlay polls: the current QR text while pairing runs, and whether
+    the session ended up paired. On success the same process simply continues as the sync."""
+    paired = _paired()
     qr = _qr_file()
     return {
-        "paired": _paired(),
-        "pairing": _pairing is not None and _pairing.returncode is None,
+        "paired": paired,
+        "pairing": not paired
+        and (_pair_requested.is_set() or (_child_pairing and _child is not None and _child.returncode is None)),
         "qr": qr.read_text() if qr.exists() else None,
     }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -20,30 +21,60 @@ type bridge struct {
 	store     *Store
 	media     *mediaPool
 	refreshed bool
+	loggedOut chan struct{}
+	once      sync.Once
 }
 
 // runSync is the daemon: connect, mirror every message and history-sync payload into the
 // store, download media eagerly, and keep running until the context ends. It never sends
 // anything and never marks anything read.
-func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store) error {
-	if cli.Store.ID == nil {
-		return errors.New("not paired; run `wabridge auth` first")
-	}
-	b := &bridge{ctx: ctx, cli: cli, store: store, media: newMediaPool(ctx, cli, store)}
+//
+// Pairing happens in here too, when allowed: the freshly paired connection stays up and
+// simply becomes the sync. A separate pair-then-exit step loses twice — the phone rolls
+// back a device that disconnects right after scanning, and the one-time history push that
+// follows pairing lands before any second process could take over.
+func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, pair bool, phone, qrFile string) error {
+	b := &bridge{ctx: ctx, cli: cli, store: store, media: newMediaPool(ctx, cli, store), loggedOut: make(chan struct{})}
 
 	// Manual mode delivers history blobs as notifications instead of downloading them
-	// behind our back, so ingest controls the timing and sees every payload.
+	// behind our back, so ingest controls the timing and sees every payload. Set before
+	// connecting, so the pairing push is already ours.
 	cli.ManualHistorySyncDownload = true
 	cli.AddEventHandler(b.handle)
+
+	var qrChan <-chan whatsmeow.QRChannelItem
+	if cli.Store.ID == nil {
+		if !pair {
+			return errors.New("not paired; pair from the web UI or run `wabridge -pair sync`")
+		}
+		ch, err := cli.GetQRChannel(ctx)
+		if err != nil {
+			return err
+		}
+		qrChan = ch
+	}
 	if err := cli.Connect(); err != nil {
 		return err
 	}
+	if qrChan != nil {
+		if err := pairLoop(ctx, cli, qrChan, phone, qrFile); err != nil {
+			return err
+		}
+	}
+
 	log.Printf("syncing as %s into %s", cli.Store.ID, store.Dir)
 	b.media.EnqueueBacklog()
 
-	<-ctx.Done()
-	cli.Disconnect()
-	return nil
+	select {
+	case <-ctx.Done():
+		cli.Disconnect()
+		return nil
+	case <-b.loggedOut:
+		// Exiting is what lets the supervisor see the dead session and offer pairing
+		// again, instead of a zombie holding credentials the phone already revoked.
+		cli.Disconnect()
+		return errors.New("logged out by the phone; pair again")
+	}
 }
 
 func (b *bridge) handle(evt any) {
@@ -70,7 +101,7 @@ func (b *bridge) handle(evt any) {
 			go b.refreshNames()
 		}
 	case *events.LoggedOut:
-		log.Printf("logged out by the phone; delete session.db and pair again")
+		b.once.Do(func() { close(b.loggedOut) })
 	case *events.StreamReplaced:
 		log.Printf("another client took over this session; disconnecting")
 		b.cli.Disconnect()
