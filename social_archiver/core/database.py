@@ -131,6 +131,9 @@ MIGRATIONS = (
         "ALTER TABLE items ADD COLUMN source_target TEXT",
         "CREATE INDEX IF NOT EXISTS idx_items_source_target ON items(platform, source_target)",
     ),
+    # The chat or group a message sits in, for platforms shaped as conversations rather than
+    # posts. A group's name is neither a subreddit nor a collection, so it gets its own column.
+    ("ALTER TABLE items ADD COLUMN chat_name TEXT",),
 )
 
 
@@ -199,6 +202,9 @@ class Item:
     subreddit: str | None = None
     link_url: str | None = None
 
+    # WhatsApp-specific: the chat or group the message belongs to
+    chat_name: str | None = None
+
     # Set when a source walk archived the row, naming which account or subreddit
     source_target: str | None = None  # a link post's outbound target, which post_url is not
 
@@ -252,6 +258,7 @@ class Item:
             product_type=row["product_type"],
             subreddit=row["subreddit"],
             link_url=row["link_url"],
+            chat_name=row["chat_name"],
             source_target=row["source_target"],
             archive_status=ArchiveStatus(row["archive_status"]),
             upload_status=StageStatus(row["upload_status"]),

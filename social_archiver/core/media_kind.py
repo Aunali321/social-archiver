@@ -16,6 +16,12 @@ _MIME_TYPES = {
     ".mov": "video/quicktime",
     ".avi": "video/x-msvideo",
     ".webm": "video/webm",
+    # Voice notes and music, so the VLM gets them as audio rather than skipping them
+    ".opus": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".aac": "audio/aac",
 }
 
 
