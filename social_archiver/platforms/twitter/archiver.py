@@ -29,7 +29,7 @@ TOMBSTONE_PROBE_LIMIT = 100
 
 # How long a walked conversation counts as walked. Replies arrive close to a tweet and then stop,
 # so re-searching every run buys almost nothing; leaving it forever would miss the late ones.
-SEARCH_REFRESH = timedelta(days=30)
+SEARCH_REFRESH = timedelta(days=config.TWITTER_SEARCH_REFRESH_DAYS)
 
 
 @dataclass(frozen=True, slots=True)

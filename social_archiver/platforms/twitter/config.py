@@ -28,6 +28,10 @@ TWITTER_EXPORT_PATH = os.getenv("TWITTER_EXPORT_PATH")
 # this is what an interrupt costs, whether the seeds came from the timeline or the export.
 TWITTER_EXPAND_BATCH = int(os.getenv("TWITTER_EXPAND_BATCH", "250"))
 
+# How long a walked conversation counts as walked. On a recurring schedule this sets how often the
+# archive re-searches everything it has already seen; set it past the archive's lifetime to never.
+TWITTER_SEARCH_REFRESH_DAYS = int(os.getenv("TWITTER_SEARCH_REFRESH_DAYS", "30"))
+
 # Telegram channels; a category is enabled by configuring its channel
 TELEGRAM_CHAT_LIKES = int(os.getenv("TWITTER_CHAT_LIKES", "0"))
 TELEGRAM_CHAT_BOOKMARKS = int(os.getenv("TWITTER_CHAT_BOOKMARKS", "0"))
