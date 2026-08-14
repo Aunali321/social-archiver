@@ -652,7 +652,28 @@ class Database:
     async def pending_caption(
         self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
     ) -> list[Item]:
-        return await self._pending_stage("caption_status", platform, category, include_failed, include_refused)
+        """Video and animated GIFs first — only Gemini captions them well, so they
+        are the scarce capacity — then images, which cheaper models can also
+        handle; each newest first (NULLs, the old undated backlog, sort last).
+        This is just the pending set, so an interrupted run resumes on exactly
+        what is left."""
+        statuses = ["pending"]
+        if include_failed:
+            statuses.append("failed")
+        if include_refused:
+            statuses.append("refused")
+        placeholders = ", ".join("?" * len(statuses))
+        return await self._select_items(
+            f"""
+            SELECT * FROM items
+            WHERE platform = ? AND category = ? AND archive_status = 'archived'
+            AND caption_status IN ({placeholders})
+            ORDER BY
+                CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END,
+                created_at DESC
+            """,
+            (platform, category, *statuses),
+        )
 
     async def pending_embed(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
         """Items captioned but not yet in the vector index. Indexing follows

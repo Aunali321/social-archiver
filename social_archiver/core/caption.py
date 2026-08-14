@@ -182,19 +182,30 @@ class CaptionJob:
 
     async def _run_call(self, call: _Call, semaphore: asyncio.Semaphore):
         async with semaphore:
-            media = await self._collect_media(call.targets)
-            captionable = [target for target in call.targets if media.get(target.item_id)]
-            if not captionable:
-                return  # every target was text-only or failed; each already handled
+            try:
+                await self._caption_call(call)
+            except Exception as e:
+                # One call's unexpected failure marks its own targets failed
+                # (retryable) rather than cancelling the whole parallel batch, so
+                # a run always makes progress and resumes cleanly.
+                logger.error(f"Caption call crashed: {e}", exc_info=True)
+                for target in call.targets:
+                    await self.db.mark_caption_failed(target.item_id, f"call crashed: {e}")
 
-            parts = _interleave(call.ordered, media, call.context_map, self.port)
-            logger.info(
-                f"VLM call: {len(call.ordered)} posts context, "
-                f"{sum(len(m) for m in media.values())} media, {len(captionable)} targets"
-            )
-            result = await self.vlm.describe_thread(parts)
-            await self._record_trace(parts, [t.item_id for t in captionable], result)
-            await self._apply(result, captionable)
+    async def _caption_call(self, call: _Call):
+        media = await self._collect_media(call.targets)
+        captionable = [target for target in call.targets if media.get(target.item_id)]
+        if not captionable:
+            return  # every target was text-only or failed; each already handled
+
+        parts = _interleave(call.ordered, media, call.context_map, self.port)
+        logger.info(
+            f"VLM call: {len(call.ordered)} posts context, "
+            f"{sum(len(m) for m in media.values())} media, {len(captionable)} targets"
+        )
+        result = await self.vlm.describe_thread(parts)
+        await self._record_trace(parts, [t.item_id for t in captionable], result)
+        await self._apply(result, captionable)
 
     async def _collect_media(self, targets: tuple[Item, ...]) -> dict[str, list[tuple[int, Path, str]]]:
         """Restore each target's media. A restore that raises is a retryable

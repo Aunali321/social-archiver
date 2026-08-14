@@ -55,13 +55,13 @@ class CaptionJob:
         async with semaphore:
             try:
                 paths = await ensure_media(self.db, self.port, item)
+                results = [await self._describe(item, path, index) for index, path in enumerate(paths)]
+                await self._settle(item, results)
             except Exception as e:
-                logger.error(f"Media unavailable for {item.item_id}: {e}")
+                # Isolate one post's failure (retryable) so the parallel batch is
+                # never cancelled and the run resumes cleanly.
+                logger.error(f"Captioning failed for {item.item_id}: {e}")
                 await self.db.mark_caption_failed(item.item_id, str(e))
-                return
-
-            results = [await self._describe(item, path, index) for index, path in enumerate(paths)]
-            await self._settle(item, results)
 
     async def _describe(self, item: Item, path: Path, index: int) -> MediaResult:
         kind = guess_media_kind(path)
