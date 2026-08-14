@@ -170,7 +170,7 @@
 								<dt class="text-on-surface-variant">items</dt>
 								<dd class="text-body-lg text-on-surface tabular-nums">{p.total.toLocaleString()}</dd>
 							</div>
-							{#each [['archive', p.archive], ['upload', p.upload]] as const as [label, record] (label)}
+							{#each [['archive', p.archive], ['upload', p.upload], ['caption', p.caption]] as const as [label, record] (label)}
 								<div>
 									<dt class="text-on-surface-variant">{label}</dt>
 									<dd class="text-body text-on-surface">
@@ -243,7 +243,7 @@
 
 					<!-- Run now -->
 					<div class="mt-3 flex flex-wrap gap-2 border-t border-outline-variant pt-3">
-						{#each ['archive', 'upload', 'embed'] as job (job)}
+						{#each ['archive', 'upload', 'caption', 'embed'] as job (job)}
 							<Button variant="text" onclick={() => act(() => api.run({ platform: p.platform, job }))}>
 								{job}
 							</Button>

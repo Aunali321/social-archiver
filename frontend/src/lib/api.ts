@@ -136,6 +136,7 @@ export interface PlatformStatus {
 	total: number;
 	archive: Record<string, number>;
 	upload: Record<string, number>;
+	caption: Record<string, number>;
 	embed: Record<string, number>;
 	resumable: string[];
 	scheduled: boolean;

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 JOB_FLAGS = {
     "archive": ("category", "history", "retry_failed"),
     "upload": ("retry_failed",),
+    "caption": ("retry_failed",),
     "embed": ("retry_failed",),
     # A source job names what to walk; `history` means walk it all again rather than stopping
     # at the newest item already held.
@@ -86,6 +87,9 @@ async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> lis
     plan += [("source", None, tracked.target) for tracked in await queue.sources(schedule.platform) if tracked.enabled]
     if config.TELEGRAM_BOT_TOKEN:
         plan.append(("upload", None, None))
+    # Caption before index: indexing reads captions, so it must follow.
+    if config.CAPTIONING_ENABLED:
+        plan.append(("caption", None, None))
     if config.EMBEDDING_ENABLED:
         plan.append(("embed", None, None))
 

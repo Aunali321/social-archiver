@@ -34,6 +34,7 @@ class PlatformStatus:
     total: int = 0
     archive: dict[str, int] = field(default_factory=dict)
     upload: dict[str, int] = field(default_factory=dict)
+    caption: dict[str, int] = field(default_factory=dict)
     embed: dict[str, int] = field(default_factory=dict)
     resumable: list[str] = field(default_factory=list)
     scheduled: bool = False
@@ -103,6 +104,7 @@ def _status(platform: str) -> PlatformStatus:
         status.total = db.execute("SELECT count(*) FROM items").fetchone()[0]
         status.archive = _counts(db, "archive_status")
         status.upload = _counts(db, "upload_status")
+        status.caption = _counts(db, "caption_status")
         status.embed = _counts(db, "embed_status")
         status.resumable = [row[0] for row in db.execute("SELECT category FROM fetch_cursors")]
     except sqlite3.Error as e:
