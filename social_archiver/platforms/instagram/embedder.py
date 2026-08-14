@@ -38,18 +38,25 @@ class CaptionJob:
         for category in self.port.chats:
             if remaining is not None and remaining <= 0:
                 break
-            pending = await self.db.pending_caption(PLATFORM, category, retry_failed, retry_refused)
-            if remaining is not None:
-                pending = pending[:remaining]
-                remaining -= len(pending)
-            if not pending:
-                continue
+            # A post is its own root here, so a batch of roots is a batch of
+            # posts: the run holds one batch rather than the whole backlog.
+            roots = await self.db.pending_caption_roots(PLATFORM, category, retry_failed, retry_refused)
+            for start in range(0, len(roots), config.CAPTION_BATCH_CONVERSATIONS):
+                if remaining is not None and remaining <= 0:
+                    break
+                batch = roots[start : start + config.CAPTION_BATCH_CONVERSATIONS]
+                pending = await self.db.pending_caption(PLATFORM, category, batch, retry_failed, retry_refused)
+                if remaining is not None:
+                    pending = pending[:remaining]
+                    remaining -= len(pending)
+                if not pending:
+                    continue
 
-            logger.info(f"Captioning {len(pending)} {category} items, {config.EMBED_CONCURRENCY} at a time")
-            semaphore = asyncio.Semaphore(config.EMBED_CONCURRENCY)
-            async with asyncio.TaskGroup() as tasks:
-                for item in pending:
-                    tasks.create_task(self._caption_item(item, semaphore))
+                logger.info(f"Captioning {len(pending)} {category} items, {config.EMBED_CONCURRENCY} at a time")
+                semaphore = asyncio.Semaphore(config.EMBED_CONCURRENCY)
+                async with asyncio.TaskGroup() as tasks:
+                    for item in pending:
+                        tasks.create_task(self._caption_item(item, semaphore))
 
     async def _caption_item(self, item: Item, semaphore: asyncio.Semaphore):
         async with semaphore:

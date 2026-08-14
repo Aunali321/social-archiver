@@ -15,10 +15,12 @@ index the moment it lands.
 
 Threads are reconstructed from the database, so an item captioned long after
 archival still gets its full conversation as context, and an interrupted run
-resumes with whatever is still pending. The conversation is passed whole —
-there is no per-thread cap on context, only a safety ceiling on pathological
-threads. A single item's media is never split across calls, so each target is
-captioned in exactly one call and its status is unambiguous.
+resumes with whatever is still pending. A run works through the backlog a batch
+of conversations at a time, so what it holds is bounded by the batch rather than
+by the size of the backlog, which reaches millions of posts. The conversation is
+passed whole — there is no per-thread cap on context, only a safety ceiling on
+pathological threads. A single item's media is never split across calls, so each
+target is captioned in exactly one call and its status is unambiguous.
 
 Every call is recorded as a trace (input with media as path references, the
 model's reasoning and raw output, usage, status) before the item statuses are
@@ -105,30 +107,51 @@ class CaptionJob:
         for category in self.port.chats:
             if remaining is not None and remaining <= 0:
                 break
-            pending = await self.db.pending_caption(self.port.platform, category, retry_failed, retry_refused)
-            if remaining is not None:
-                pending = pending[:remaining]
-                remaining -= len(pending)
-            if not pending:
+            roots = await self.db.pending_caption_roots(self.port.platform, category, retry_failed, retry_refused)
+            if not roots:
                 continue
-
-            conversations, context_map = await self._load(pending)
-
-            for conversation in conversations:
-                for member in conversation.members:
-                    if member.item_id in conversation.target_ids and not member.media_count:
-                        await self.db.mark_captioned(member.item_id, None)
-
-            calls = [call for conversation in conversations for call in self._plan_calls(conversation, context_map)]
             logger.info(
-                f"Captioning {len(pending)} {category} items across {len(conversations)} conversations "
-                f"in {len(calls)} VLM calls, {config.EMBED_CONCURRENCY} at a time"
+                f"Captioning {category}: {len(roots)} conversations pending, "
+                f"{config.CAPTION_BATCH_CONVERSATIONS} conversations per batch"
             )
+            for start in range(0, len(roots), config.CAPTION_BATCH_CONVERSATIONS):
+                if remaining is not None and remaining <= 0:
+                    break
+                batch = roots[start : start + config.CAPTION_BATCH_CONVERSATIONS]
+                captioned = await self._run_batch(category, batch, retry_failed, retry_refused, remaining)
+                if remaining is not None:
+                    remaining -= captioned
 
-            semaphore = asyncio.Semaphore(config.EMBED_CONCURRENCY)
-            async with asyncio.TaskGroup() as tasks:
-                for call in calls:
-                    tasks.create_task(self._run_call(call, semaphore))
+    async def _run_batch(
+        self, category: str, roots: list[str], retry_failed: bool, retry_refused: bool, cap: int | None
+    ) -> int:
+        """One batch of conversations, loaded and released together. Batching is
+        what bounds a run's memory: the pending set and every thread member of a
+        platform with a large backlog do not fit at once."""
+        pending = await self.db.pending_caption(self.port.platform, category, roots, retry_failed, retry_refused)
+        if cap is not None:
+            pending = pending[:cap]
+        if not pending:
+            return 0
+
+        conversations, context_map = await self._load(pending)
+
+        for conversation in conversations:
+            for member in conversation.members:
+                if member.item_id in conversation.target_ids and not member.media_count:
+                    await self.db.mark_captioned(member.item_id, None)
+
+        calls = [call for conversation in conversations for call in self._plan_calls(conversation, context_map)]
+        logger.info(
+            f"Captioning {len(pending)} {category} items across {len(conversations)} conversations "
+            f"in {len(calls)} VLM calls, {config.EMBED_CONCURRENCY} at a time"
+        )
+
+        semaphore = asyncio.Semaphore(config.EMBED_CONCURRENCY)
+        async with asyncio.TaskGroup() as tasks:
+            for call in calls:
+                tasks.create_task(self._run_call(call, semaphore))
+        return len(pending)
 
     async def _load(self, pending: list[Item]) -> tuple[list[_Conversation], dict[str, Item]]:
         target_ids = {item.item_id for item in pending}

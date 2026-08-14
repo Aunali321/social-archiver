@@ -649,31 +649,73 @@ class Database:
     async def pending_upload(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
         return await self._pending_stage("upload_status", platform, category, include_failed)
 
-    async def pending_caption(
-        self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
-    ) -> list[Item]:
-        """Video and animated GIFs first — only Gemini captions them well, so they
-        are the scarce capacity — then images, which cheaper models can also
-        handle; each newest first (NULLs, the old undated backlog, sort last).
-        This is just the pending set, so an interrupted run resumes on exactly
-        what is left."""
+    @staticmethod
+    def _caption_statuses(include_failed: bool, include_refused: bool) -> list[str]:
         statuses = ["pending"]
         if include_failed:
             statuses.append("failed")
         if include_refused:
             statuses.append("refused")
-        placeholders = ", ".join("?" * len(statuses))
-        return await self._select_items(
+        return statuses
+
+    async def pending_caption_roots(
+        self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
+    ) -> list[str]:
+        """The conversations still holding uncaptioned items, in the order they
+        should be captioned: video and animated GIFs first — only Gemini captions
+        them well, so they are the scarce capacity — then images, which cheaper
+        models can also handle; each newest first (NULLs, the old undated
+        backlog, sort last).
+
+        Roots rather than items, so a caller works through a large backlog whole
+        conversations at a time instead of holding every pending item and every
+        thread member of a platform in memory at once. Just the roots, so this
+        stays cheap on a backlog of millions; the items come back per batch."""
+        statuses = self._caption_statuses(include_failed, include_refused)
+        cursor = await self._connection.execute(
             f"""
-            SELECT * FROM items
+            SELECT COALESCE(thread_root_id, item_id) AS root FROM items
             WHERE platform = ? AND category = ? AND archive_status = 'archived'
-            AND caption_status IN ({placeholders})
+            AND caption_status IN ({", ".join("?" * len(statuses))})
+            GROUP BY root
             ORDER BY
-                CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END,
-                created_at DESC
+                MIN(CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END),
+                MAX(created_at) DESC
             """,
             (platform, category, *statuses),
         )
+        return [row["root"] for row in await cursor.fetchall()]
+
+    async def pending_caption(
+        self,
+        platform: str,
+        category: str,
+        roots: Sequence[str],
+        include_failed: bool = False,
+        include_refused: bool = False,
+    ) -> list[Item]:
+        """The uncaptioned items inside the given conversations, in the same
+        video-first order. Only the pending set, so an interrupted run resumes on
+        exactly what is left."""
+        statuses = self._caption_statuses(include_failed, include_refused)
+        items: list[Item] = []
+        for start in range(0, len(roots), _MAX_PARAMETERS):
+            chunk = roots[start : start + _MAX_PARAMETERS]
+            items.extend(
+                await self._select_items(
+                    f"""
+                    SELECT * FROM items
+                    WHERE platform = ? AND category = ? AND archive_status = 'archived'
+                    AND caption_status IN ({", ".join("?" * len(statuses))})
+                    AND COALESCE(thread_root_id, item_id) IN ({", ".join("?" * len(chunk))})
+                    ORDER BY
+                        CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END,
+                        created_at DESC
+                    """,
+                    (platform, category, *statuses, *chunk),
+                )
+            )
+        return items
 
     async def pending_embed(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
         """Items captioned but not yet in the vector index. Indexing follows
@@ -715,18 +757,26 @@ class Database:
     async def thread_members(self, platform: str, root_ids: set[str]) -> list[Item]:
         """All archived items belonging to the given thread roots (the roots
         themselves included), for VLM context reconstruction."""
-        if not root_ids:
-            return []
-        placeholders = ", ".join("?" * len(root_ids))
-        return await self._select_items(
-            f"""
-            SELECT * FROM items
-            WHERE platform = ? AND archive_status = 'archived'
-            AND (thread_root_id IN ({placeholders}) OR item_id IN ({placeholders}))
-            ORDER BY created_at
-            """,
-            (platform, *root_ids, *root_ids),
-        )
+        roots = list(root_ids)
+        items: list[Item] = []
+        # Each chunk binds its roots twice, so it gets half the parameter budget.
+        # Members of one thread always share a chunk, which is what keeps them
+        # ordered relative to each other once the caller groups by root.
+        for start in range(0, len(roots), _MAX_PARAMETERS // 2):
+            chunk = roots[start : start + _MAX_PARAMETERS // 2]
+            placeholders = ", ".join("?" * len(chunk))
+            items.extend(
+                await self._select_items(
+                    f"""
+                    SELECT * FROM items
+                    WHERE platform = ? AND archive_status = 'archived'
+                    AND (thread_root_id IN ({placeholders}) OR item_id IN ({placeholders}))
+                    ORDER BY created_at
+                    """,
+                    (platform, *chunk, *chunk),
+                )
+            )
+        return items
 
     async def cleanup_candidates(self, platform: str, require_caption: bool, require_embed: bool) -> list[Item]:
         """Items whose downloads every enabled consumer has finished with.

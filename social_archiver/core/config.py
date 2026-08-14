@@ -65,6 +65,10 @@ EMBED_MAX_MEDIA_PER_CALL = int(os.getenv("EMBED_MAX_MEDIA_PER_CALL", "20"))
 # A safety ceiling on context for pathological threads; real threads sit far
 # under it, so it never bites normally.
 VLM_MAX_CONTEXT_POSTS = int(os.getenv("VLM_MAX_CONTEXT_POSTS", "3000"))
+# Conversations a caption run loads at once. A batch holds its posts and every
+# thread member around them, so this is what bounds the run against a backlog of
+# millions rather than the machine's memory.
+CAPTION_BATCH_CONVERSATIONS = int(os.getenv("CAPTION_BATCH_CONVERSATIONS", "500"))
 # Vertex accepts a 500 MB request payload and base64 inflates ~33%, so cap the
 # raw file below that. Larger media is indexed on its text alone.
 VLM_MAX_MEDIA_BYTES = int(os.getenv("VLM_MAX_MEDIA_BYTES", str(360 * 1024 * 1024)))
