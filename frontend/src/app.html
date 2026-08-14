@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Archive</title>
+		<script>
+			// Applied before first paint so the chosen theme never flashes
+			const theme = localStorage.getItem('theme');
+			if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

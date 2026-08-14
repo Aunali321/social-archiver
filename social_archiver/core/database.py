@@ -9,6 +9,7 @@ from typing import Self
 import aiosqlite
 
 from social_archiver.core import migrations
+from social_archiver.llm.vlm_types import VlmTrace
 
 MIGRATIONS = (
     (
@@ -134,6 +135,65 @@ MIGRATIONS = (
     # The chat or group a message sits in, for platforms shaped as conversations rather than
     # posts. A group's name is neither a subreddit nor a collection, so it gets its own column.
     ("ALTER TABLE items ADD COLUMN chat_name TEXT",),
+    # Substring search over hundreds of thousands of rows is a full table scan, so the archive
+    # is write-only in practice. An external-content FTS index makes it browsable; triggers
+    # keep it in step with every write path, and the rebuild backfills the rows already held.
+    (
+        """
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+                        text, vlm_description, author_username, chat_name,
+                        content='items', content_rowid='rowid',
+                        tokenize='unicode61 remove_diacritics 2'
+                    )
+        """,
+        """
+        CREATE TRIGGER items_fts_after_insert AFTER INSERT ON items BEGIN
+                        INSERT INTO items_fts(rowid, text, vlm_description, author_username, chat_name)
+                        VALUES (new.rowid, new.text, new.vlm_description, new.author_username, new.chat_name);
+                    END
+        """,
+        """
+        CREATE TRIGGER items_fts_after_delete AFTER DELETE ON items BEGIN
+                        INSERT INTO items_fts(items_fts, rowid, text, vlm_description, author_username, chat_name)
+                        VALUES ('delete', old.rowid, old.text, old.vlm_description, old.author_username, old.chat_name);
+                    END
+        """,
+        """
+        CREATE TRIGGER items_fts_after_update AFTER UPDATE OF text, vlm_description, author_username, chat_name
+                    ON items BEGIN
+                        INSERT INTO items_fts(items_fts, rowid, text, vlm_description, author_username, chat_name)
+                        VALUES ('delete', old.rowid, old.text, old.vlm_description, old.author_username, old.chat_name);
+                        INSERT INTO items_fts(rowid, text, vlm_description, author_username, chat_name)
+                        VALUES (new.rowid, new.text, new.vlm_description, new.author_username, new.chat_name);
+                    END
+        """,
+        "INSERT INTO items_fts(items_fts) VALUES ('rebuild')",
+    ),
+    # Every VLM captioning call, recorded whole: the interleaved input (media as
+    # path references, never bytes), the model's reasoning and raw output, usage
+    # and a status. Cost accounting reads it, a refused-item retry reads it, and
+    # it is the distillation dataset a later fine-tune trains on.
+    (
+        """
+        CREATE TABLE IF NOT EXISTS vlm_traces (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        platform TEXT NOT NULL,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        model TEXT NOT NULL,
+                        provider TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        finish_reason TEXT,
+                        params TEXT NOT NULL,
+                        target_item_ids TEXT NOT NULL,
+                        input TEXT NOT NULL,
+                        reasoning TEXT,
+                        output TEXT,
+                        usage TEXT,
+                        error TEXT
+                    )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_vlm_traces_platform_status ON vlm_traces(platform, status)",
+    ),
 )
 
 
@@ -152,6 +212,10 @@ class StageStatus(StrEnum):
     DONE = "done"
     SKIPPED = "skipped"
     FAILED = "failed"
+    # Embed only: the VLM declined this content (safety/policy/recitation), as
+    # opposed to a technical failure. Kept apart so a scheduled retry can target
+    # refusals without also re-running everything that failed transiently.
+    REFUSED = "refused"
 
 
 @dataclass(slots=True)
@@ -545,22 +609,53 @@ class Database:
             (platform,),
         )
 
-    async def _pending_stage(self, stage: str, platform: str, category: str, include_failed: bool) -> list[Item]:
-        statuses = "('pending', 'failed')" if include_failed else "('pending')"
+    async def _pending_stage(
+        self, stage: str, platform: str, category: str, include_failed: bool, include_refused: bool = False
+    ) -> list[Item]:
+        statuses = ["pending"]
+        if include_failed:
+            statuses.append("failed")
+        if include_refused:
+            statuses.append("refused")
+        placeholders = ", ".join("?" * len(statuses))
         return await self._select_items(
             f"""
             SELECT * FROM items
-            WHERE platform = ? AND category = ? AND archive_status = 'archived' AND {stage} IN {statuses}
+            WHERE platform = ? AND category = ? AND archive_status = 'archived' AND {stage} IN ({placeholders})
             ORDER BY created_at
             """,
-            (platform, category),
+            (platform, category, *statuses),
         )
 
     async def pending_upload(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
         return await self._pending_stage("upload_status", platform, category, include_failed)
 
-    async def pending_embed(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
-        return await self._pending_stage("embed_status", platform, category, include_failed)
+    async def pending_embed(
+        self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
+    ) -> list[Item]:
+        return await self._pending_stage("embed_status", platform, category, include_failed, include_refused)
+
+    async def items_by_ids(self, platform: str, item_ids: set[str]) -> list[Item]:
+        """Archived items by primary key, for context that lives outside the
+        thread being embedded — a quoted post in another conversation, which
+        `thread_members` never reaches."""
+        if not item_ids:
+            return []
+        ids = list(item_ids)
+        items: list[Item] = []
+        for start in range(0, len(ids), _MAX_PARAMETERS):
+            chunk = ids[start : start + _MAX_PARAMETERS]
+            items.extend(
+                await self._select_items(
+                    f"""
+                    SELECT * FROM items
+                    WHERE platform = ? AND archive_status = 'archived'
+                    AND item_id IN ({", ".join("?" * len(chunk))})
+                    """,
+                    (platform, *chunk),
+                )
+            )
+        return items
 
     async def thread_members(self, platform: str, root_ids: set[str]) -> list[Item]:
         """All archived items belonging to the given thread roots (the roots
@@ -704,6 +799,42 @@ class Database:
         await self._connection.execute(
             "UPDATE items SET embed_status = 'failed', embed_error = ? WHERE item_id = ?",
             (error, item_id),
+        )
+        await self._connection.commit()
+
+    async def mark_embed_refused(self, item_id: str, reason: str):
+        """The VLM declined this content. Distinct from failed so a later pass
+        can retry refusals on their own."""
+        await self._connection.execute(
+            "UPDATE items SET embed_status = 'refused', embed_error = ? WHERE item_id = ?",
+            (reason, item_id),
+        )
+        await self._connection.commit()
+
+    async def insert_trace(self, trace: VlmTrace):
+        """Record one captioning call. Committed on its own so a trace survives
+        even if the item's status write later fails."""
+        await self._connection.execute(
+            """
+            INSERT INTO vlm_traces
+                (platform, model, provider, status, finish_reason, params,
+                 target_item_ids, input, reasoning, output, usage, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trace.platform,
+                trace.model,
+                trace.provider,
+                str(trace.status),
+                trace.finish_reason,
+                json.dumps(trace.params),
+                json.dumps(trace.target_item_ids),
+                json.dumps(trace.input),
+                trace.reasoning,
+                trace.output,
+                json.dumps(trace.usage),
+                trace.error,
+            ),
         )
         await self._connection.commit()
 

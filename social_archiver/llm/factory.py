@@ -18,6 +18,9 @@ def create_vlm_client(provider: str) -> tuple[Any, str]:
             model=config.VERTEX_MODEL,
             project=config.VERTEX_PROJECT,
             location=config.VERTEX_LOCATION,
+            service_tier=config.VERTEX_SERVICE_TIER,
+            capture_reasoning=config.VLM_CAPTURE_REASONING,
+            max_output_tokens=config.VLM_MAX_OUTPUT_TOKENS,
             timeout=config.EMBEDDING_TIMEOUT,
         )
         return client, config.VERTEX_MODEL

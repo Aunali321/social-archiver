@@ -1,7 +1,6 @@
 import os
 
 from social_archiver.core.config import (
-    CHECK_INTERVAL_MINUTES,
     DATA_DIR,
     DOWNLOAD_CONCURRENCY,
     DOWNLOADS_DIR,

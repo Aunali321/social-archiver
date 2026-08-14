@@ -15,11 +15,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 from social_archiver.core import config
+from social_archiver.core.config import PLATFORMS
 from social_archiver.core.queue import Job, JobQueue, Schedule
 
 logger = logging.getLogger(__name__)
-
-PLATFORMS = ("instagram", "reddit", "twitter", "whatsapp")
 
 # Which flags each job accepts, mirroring core.cli.build_parser
 JOB_FLAGS = {
@@ -74,8 +73,8 @@ def sidecar_status(platform: str) -> str | None:
     return module.status() if module else None
 
 
-def next_run() -> datetime:
-    return datetime.now() + timedelta(minutes=config.CHECK_INTERVAL_MINUTES)
+def next_run(interval_minutes: int) -> datetime:
+    return datetime.now() + timedelta(minutes=interval_minutes)
 
 
 async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> list[Job]:
@@ -98,7 +97,7 @@ async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> lis
 
 
 async def _invoke(job: Job):
-    entry = importlib.import_module(f"social_archiver.platforms.{job.platform}.__main__")
+    entry = importlib.import_module(f"social_archiver.platforms.{job.platform}.service")
     target = getattr(entry, job.job)
     flags = JOB_FLAGS[job.job]
     kwargs: dict[str, object] = {}
@@ -137,7 +136,9 @@ async def worker(queue: JobQueue, platform: str):
 async def seed_schedules(queue: JobQueue):
     """Runs before anything can read a schedule, so nothing sees a platform that has no row yet."""
     for platform in PLATFORMS:
-        await queue.ensure_schedule(platform, categories(platform), next_run())
+        await queue.ensure_schedule(
+            platform, categories(platform), next_run(config.CHECK_INTERVAL_MINUTES), config.CHECK_INTERVAL_MINUTES
+        )
 
 
 async def scheduler(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
@@ -155,10 +156,7 @@ async def scheduler(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
                 await enqueue_cycle(queue, schedule, source="startup")
         logger.info("RUN_ON_START set, queued a cycle for every scheduled platform")
 
-    logger.info(
-        f"Scheduler idle for {', '.join(platforms)}; "
-        f"a due platform queues a cycle, every {config.CHECK_INTERVAL_MINUTES} minutes"
-    )
+    logger.info(f"Scheduler idle for {', '.join(platforms)}; a due platform queues a cycle on its own interval")
     while True:
         await asyncio.sleep(SCHEDULE_POLL_SECONDS)
         try:
@@ -167,7 +165,13 @@ async def scheduler(queue: JobQueue, platforms: Sequence[str] = PLATFORMS):
                 if not schedule.due(now):
                     continue
                 # Reschedule first: a failure below costs one cycle, not an immediate retry loop.
-                await queue.set_schedule(schedule.platform, True, schedule.categories, next_run())
+                await queue.set_schedule(
+                    schedule.platform,
+                    True,
+                    schedule.categories,
+                    next_run(schedule.interval_minutes),
+                    schedule.interval_minutes,
+                )
                 queued = await enqueue_cycle(queue, schedule, source="schedule")
                 logger.info(f"Queued {len(queued)} job(s) for the {schedule.platform} cycle")
         except Exception:

@@ -18,6 +18,9 @@ session.json
 
 # Credentials
 service-account.json
+vertex-ai-key.json
+google-credentials.json
+credentials.json
 
 # Database
 database.db

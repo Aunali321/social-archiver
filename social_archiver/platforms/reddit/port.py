@@ -3,7 +3,8 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from social_archiver.core.database import Item
+from social_archiver.core.database import Database, Item
+from social_archiver.core.jobs import ensure_media
 from social_archiver.platforms.reddit import config
 
 PLATFORM = "reddit"
@@ -50,3 +51,24 @@ class RedditPort:
         """Seed items (the ones actually saved/voted/authored) go up first; their
         discovered thread context follows in chronological order."""
         return (item.origin not in SEED_ORIGINS, item.created_at or _EPOCH)
+
+    def embed_thread_key(self, item: Item) -> str:
+        return item.thread_root_id or item.item_id
+
+    def embed_category(self, item: Item, loop_category: str) -> str:
+        return loop_category
+
+    async def embed_collect_media(self, db: Database, item: Item) -> list[Path]:
+        return await ensure_media(db, self, item)
+
+    async def embed_extra_context(self, db: Database, members: list[Item]) -> list[Item]:
+        return []  # reddit has no cross-conversation quote graph
+
+    def embed_label(self, item: Item, context: dict[str, Item]) -> str:
+        label = f"[tweet_id:{item.item_id}]"
+        if item.origin and item.origin not in SEED_ORIGINS:
+            label += f" [{item.origin}]"
+        label += f" r/{item.subreddit} u/{item.author_username}" if item.subreddit else f" u/{item.author_username}"
+        if text := (item.text or "").strip():
+            label += f": {text}"
+        return label

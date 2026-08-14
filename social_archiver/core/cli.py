@@ -24,6 +24,9 @@ def build_parser(
 
     embed = commands.add_parser("embed", help="Generate VLM descriptions and search embeddings")
     embed.add_argument("--retry-failed", action="store_true", help="Also retry items whose embedding previously failed")
+    embed.add_argument(
+        "--retry-refused", action="store_true", help="Also retry items the VLM previously declined on safety/policy"
+    )
 
     if source_kinds:
         source = commands.add_parser("source", help="Archive an account or subreddit in full")

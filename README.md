@@ -102,7 +102,7 @@ embedder. Leave `RERANK_URL` empty and search returns plain vector order.
 
 ## The service
 
-`python -m social_archiver.web` is the whole thing: a web UI on port 8787, a scheduler, and
+`python -m social_archiver.api` is the whole thing: a web UI on port 8787, a scheduler, and
 one worker per platform.
 
 The scheduler and the UI both *enqueue* jobs; only the worker runs them. So a timer firing
@@ -115,7 +115,7 @@ interrupted rather than vanishing. The UI shows the queue, recent runs and their
 It has no authentication and can start jobs, so keep it on the LAN.
 
 ```bash
-uv run python -m social_archiver.web                        # UI + scheduler + workers
+uv run python -m social_archiver.api                        # UI + scheduler + workers
 uv run python -m social_archiver.daemon                     # the same, without the UI
 uv run python -m social_archiver.daemon --platform reddit   # only this platform, repeatable
 ```
@@ -162,7 +162,14 @@ uv run python -m social_archiver.platforms.twitter run
 Search the archive:
 
 ```bash
-uv run python scripts/search.py "your query" --platform reddit --category saved
+uv run social-archiver search "your query" --platform reddit --category saved
+uv run social-archiver stats
+```
+
+Expose it to an MCP client (read-only tools over stdio):
+
+```json
+{"mcpServers": {"social-archiver": {"command": "uv", "args": ["run", "social-archiver", "mcp"]}}}
 ```
 
 ### Account exports

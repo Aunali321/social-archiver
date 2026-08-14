@@ -60,6 +60,9 @@ MIGRATIONS = (
         )
         """,
     ),
+    # Each platform cycles on its own clock. Nullable so a pre-existing row is recognisable
+    # at seed time and backfilled with the configured default rather than a literal here.
+    ("ALTER TABLE schedules ADD COLUMN interval_minutes INTEGER",),
 )
 
 
@@ -121,6 +124,7 @@ class Schedule:
     enabled: bool
     categories: list[str]
     next_run: datetime
+    interval_minutes: int
 
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> "Schedule":
@@ -129,6 +133,7 @@ class Schedule:
             enabled=bool(row["enabled"]),
             categories=json.loads(row["categories"]),
             next_run=datetime.fromisoformat(row["next_run"]),
+            interval_minutes=row["interval_minutes"],
         )
 
     def due(self, now: datetime) -> bool:
@@ -249,10 +254,19 @@ class JobQueue:
         )
         return [Job.from_row(row) for row in await cursor.fetchall()]
 
-    async def ensure_schedule(self, platform: str, categories: list[str], next_run: datetime):
+    async def ensure_schedule(self, platform: str, categories: list[str], next_run: datetime, interval_minutes: int):
         await self._connection.execute(
-            "INSERT OR IGNORE INTO schedules (platform, enabled, categories, next_run) VALUES (?, 1, ?, ?)",
-            (platform, json.dumps(categories), next_run.isoformat()),
+            """
+            INSERT OR IGNORE INTO schedules (platform, enabled, categories, next_run, interval_minutes)
+            VALUES (?, 1, ?, ?, ?)
+            """,
+            (platform, json.dumps(categories), next_run.isoformat(), interval_minutes),
+        )
+        # A row from before the interval column existed carries NULL; it takes the default
+        # here, once, and is per-platform from then on.
+        await self._connection.execute(
+            "UPDATE schedules SET interval_minutes = ? WHERE platform = ? AND interval_minutes IS NULL",
+            (interval_minutes, platform),
         )
         await self._connection.commit()
 
@@ -265,10 +279,12 @@ class JobQueue:
         row = await cursor.fetchone()
         return Schedule.from_row(row) if row else None
 
-    async def set_schedule(self, platform: str, enabled: bool, categories: list[str], next_run: datetime) -> bool:
+    async def set_schedule(
+        self, platform: str, enabled: bool, categories: list[str], next_run: datetime, interval_minutes: int
+    ) -> bool:
         cursor = await self._connection.execute(
-            "UPDATE schedules SET enabled = ?, categories = ?, next_run = ? WHERE platform = ?",
-            (int(enabled), json.dumps(categories), next_run.isoformat(), platform),
+            "UPDATE schedules SET enabled = ?, categories = ?, next_run = ?, interval_minutes = ? WHERE platform = ?",
+            (int(enabled), json.dumps(categories), next_run.isoformat(), interval_minutes, platform),
         )
         await self._connection.commit()
         return cursor.rowcount > 0

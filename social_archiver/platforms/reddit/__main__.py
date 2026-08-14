@@ -1,88 +1,15 @@
 import asyncio
 import logging
 import sys
-from pathlib import Path
 
 from social_archiver.core.cli import build_parser
 from social_archiver.core.config import ConfigError
-from social_archiver.core.database import Database
-from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
-from social_archiver.core.milvus_manager import MilvusManager
-from social_archiver.core.sources import SourceJob, SourceRef
-from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.core.utils import setup_logging
-from social_archiver.llm.factory import create_vlm_client
 from social_archiver.platforms.reddit import config
-from social_archiver.platforms.reddit.archiver import ArchiveJob
-from social_archiver.platforms.reddit.client import RedditClient
-from social_archiver.platforms.reddit.embedder import EmbedJob
-from social_archiver.platforms.reddit.port import RedditPort
+from social_archiver.platforms.reddit.service import archive, embed, run_all, source, upload
 from social_archiver.platforms.reddit.sources import RedditSourceFetcher
 
 logger = logging.getLogger(__name__)
-
-PORT = RedditPort()
-
-MILVUS_COLLECTIONS = {
-    "saved": "reddit_saved",
-    "upvoted": "reddit_upvoted",
-    "downvoted": "reddit_downvoted",
-    "own": "reddit_own",
-}
-
-
-async def archive(fetch_all: bool = False, category: str | None = None, retry_failed: bool = False):
-    config.validate_archive()
-    client = RedditClient()
-    try:
-        logger.info(f"Authenticated as u/{await client.verify()}")
-        tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
-        async with Database(config.DATABASE_PATH) as db:
-            await ArchiveJob(client, db, PORT, tg).run(fetch_all, category, retry_failed)
-    finally:
-        await client.close()
-
-
-async def source(target: str, kind: str = "subreddit", full: bool = False, no_media: bool = False):
-    """`full` has no effect here: the dump is a local file, so every run reads all of it and
-    dedupes by id. There is no paging to stop early."""
-    config.validate_source()
-    async with Database(config.DATABASE_PATH) as db:
-        job = SourceJob(db, PORT, RedditSourceFetcher(Path(config.REDDIT_DUMP_DIR)))
-        await job.run(SourceRef(PORT.platform, kind, target), download=not no_media)
-
-
-async def upload(retry_failed: bool = False):
-    config.validate_upload()
-    async with Database(config.DATABASE_PATH) as db:
-        await UploadJob(db, TelegramClient(), PORT).run(retry_failed)
-        await cleanup_downloads(db, PORT)
-
-
-async def embed(retry_failed: bool = False):
-    config.validate_embed()
-    vlm_client, model_name = create_vlm_client(config.VLM_PROVIDER)
-    logger.info(f"Embedding with provider={config.VLM_PROVIDER}, model={model_name}")
-
-    milvus = MilvusManager(uri=config.REDDIT_MILVUS_URI, collections=MILVUS_COLLECTIONS)
-    milvus.initialize_collections()
-    try:
-        async with Database(config.DATABASE_PATH) as db:
-            await EmbedJob(db, vlm_client, milvus, PORT).run(retry_failed)
-            await cleanup_downloads(db, PORT)
-    finally:
-        milvus.close()
-
-
-async def run_all(fetch_all: bool = False):
-    jobs = {"archive": lambda: archive(fetch_all)}
-    # Uploading and embedding are opt-in: without a bot token or an embedding server
-    # there is nothing for them to do, and archiving does not depend on either.
-    if config.TELEGRAM_BOT_TOKEN:
-        jobs["upload"] = upload
-    if config.EMBEDDING_ENABLED:
-        jobs["embed"] = embed
-    await run_jobs(jobs)
 
 
 def main():
@@ -100,7 +27,7 @@ def main():
         case "upload":
             asyncio.run(upload(args.retry_failed))
         case "embed":
-            asyncio.run(embed(args.retry_failed))
+            asyncio.run(embed(args.retry_failed, args.retry_refused))
         case "source":
             asyncio.run(source(args.target, args.kind, args.full, args.no_media))
         case "run":

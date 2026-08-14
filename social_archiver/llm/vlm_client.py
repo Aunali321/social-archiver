@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from social_archiver.llm._backoff import retry_wait
+from social_archiver.llm.vlm_types import MediaResult, VlmStatus
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +44,22 @@ class VLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> str | None:
+    @property
+    def model(self) -> str:
+        return self.vlm_model
+
+    @property
+    def provider(self) -> str:
+        return "openrouter"
+
+    @property
+    def params(self) -> dict:
+        return {}
+
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> MediaResult:
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
-            return None
+            return MediaResult(VlmStatus.FAILED, None, None, None, {}, "media file not found")
 
         media_b64 = base64.b64encode(media_path.read_bytes()).decode("utf-8")
 
@@ -64,7 +77,7 @@ class VLMClient:
             ]
         else:
             logger.error(f"Unknown media type: {media_type}")
-            return None
+            return MediaResult(VlmStatus.FAILED, None, None, None, {}, f"unknown media type: {media_type}")
 
         payload = {"model": self.vlm_model, "messages": [{"role": "user", "content": content}], "max_tokens": 8192}
         return await self._call_openrouter(payload)
@@ -83,7 +96,7 @@ class VLMClient:
             path.suffix.lower(), "video/mp4"
         )
 
-    async def _call_openrouter(self, payload: dict) -> str | None:
+    async def _call_openrouter(self, payload: dict) -> MediaResult:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -99,7 +112,7 @@ class VLMClient:
 
                     if response.status_code in (401, 402, 403):
                         logger.error(f"Auth error ({response.status_code}): {response.text[:200]}")
-                        return None
+                        return MediaResult(VlmStatus.FAILED, None, None, None, {}, f"auth error {response.status_code}")
 
                     if response.status_code == 429:
                         wait = retry_wait(attempt)
@@ -110,11 +123,19 @@ class VLMClient:
                     response.raise_for_status()
                     data = response.json()
 
-                    if not data.get("choices"):
+                    choices = data.get("choices")
+                    if not choices:
                         logger.warning(f"Unexpected response: {data}")
                         raise KeyError("choices")
 
-                    return data["choices"][0]["message"]["content"]
+                    choice = choices[0]
+                    finish = choice.get("finish_reason")
+                    text = (choice["message"]["content"] or "").strip()
+                    if finish == "content_filter":
+                        return MediaResult(VlmStatus.REFUSED, None, None, finish, {}, "blocked: content_filter")
+                    if not text:
+                        return MediaResult(VlmStatus.FAILED, None, None, finish, {}, "empty answer")
+                    return MediaResult(VlmStatus.SUCCESS, text, None, finish, {}, None)
 
             except httpx.TimeoutException:
                 wait = retry_wait(attempt)
@@ -123,9 +144,9 @@ class VLMClient:
             except Exception as e:
                 if attempt >= self.max_retries:
                     logger.error(f"Failed after {self.max_retries} attempts: {e}")
-                    return None
+                    return MediaResult(VlmStatus.FAILED, None, None, None, {}, str(e))
                 wait = retry_wait(attempt)
                 logger.warning(f"Error: {e}, retrying in {wait}s")
                 await asyncio.sleep(wait)
 
-        return None
+        return MediaResult(VlmStatus.FAILED, None, None, None, {}, "retries exhausted")

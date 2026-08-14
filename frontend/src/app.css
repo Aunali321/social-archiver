@@ -1,0 +1,306 @@
+@import 'tailwindcss';
+
+/*
+ * Material 3 design system, teal-seeded, in OKLCH.
+ * Light scheme lives on bare :root; dark redefines the same tokens under
+ * prefers-color-scheme (guarded against an explicit light choice) and again
+ * under [data-theme="dark"] so the in-app toggle wins in both directions.
+ */
+:root {
+	/* Primary (seed ~ teal 190deg) */
+	--m3-primary: oklch(48% 0.085 200);
+	--m3-on-primary: oklch(100% 0 0);
+	--m3-primary-container: oklch(91% 0.055 200);
+	--m3-on-primary-container: oklch(28% 0.06 200);
+	/* Secondary (muted teal-grey) */
+	--m3-secondary: oklch(48% 0.04 210);
+	--m3-on-secondary: oklch(100% 0 0);
+	--m3-secondary-container: oklch(90% 0.03 210);
+	--m3-on-secondary-container: oklch(27% 0.035 210);
+	/* Tertiary (dusty violet, for provenance/semantic accents) */
+	--m3-tertiary: oklch(50% 0.07 300);
+	--m3-on-tertiary: oklch(100% 0 0);
+	--m3-tertiary-container: oklch(91% 0.05 300);
+	--m3-on-tertiary-container: oklch(29% 0.06 300);
+	/* Error */
+	--m3-error: oklch(51% 0.19 27);
+	--m3-on-error: oklch(100% 0 0);
+	--m3-error-container: oklch(92% 0.05 25);
+	--m3-on-error-container: oklch(31% 0.13 28);
+	/* Surfaces — tonal ladder */
+	--m3-surface-dim: oklch(87% 0.012 210);
+	--m3-surface: oklch(98% 0.006 210);
+	--m3-surface-bright: oklch(98% 0.006 210);
+	--m3-surface-container-lowest: oklch(100% 0 0);
+	--m3-surface-container-low: oklch(96.5% 0.008 210);
+	--m3-surface-container: oklch(94.5% 0.01 210);
+	--m3-surface-container-high: oklch(92.5% 0.012 210);
+	--m3-surface-container-highest: oklch(90.5% 0.014 210);
+	--m3-on-surface: oklch(22% 0.012 220);
+	--m3-on-surface-variant: oklch(43% 0.02 215);
+	--m3-outline: oklch(58% 0.018 215);
+	--m3-outline-variant: oklch(84% 0.015 212);
+	--m3-inverse-surface: oklch(28% 0.012 220);
+	--m3-inverse-on-surface: oklch(95% 0.008 210);
+	--m3-inverse-primary: oklch(80% 0.075 200);
+	--m3-scrim: oklch(0% 0 0);
+	--m3-shadow: oklch(0% 0 0);
+	/* Status hues (archive pipeline states) */
+	--m3-success: oklch(52% 0.12 150);
+	--m3-warning: oklch(55% 0.11 75);
+	/* Platform tints, chroma-matched to the scheme */
+	--tint-twitter-bg: oklch(90% 0.05 230);
+	--tint-twitter-fg: oklch(35% 0.09 240);
+	--tint-reddit-bg: oklch(90% 0.05 45);
+	--tint-reddit-fg: oklch(38% 0.11 40);
+	--tint-instagram-bg: oklch(90% 0.05 340);
+	--tint-instagram-fg: oklch(38% 0.11 340);
+	--tint-whatsapp-bg: oklch(90% 0.05 150);
+	--tint-whatsapp-fg: oklch(35% 0.09 150);
+	/* Chart series (validated categorical, light band) */
+	--chart-twitter: oklch(52% 0.135 245);
+	--chart-reddit: oklch(52% 0.135 45);
+	--chart-instagram: oklch(52% 0.135 335);
+	--chart-whatsapp: oklch(52% 0.135 150);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		--m3-primary: oklch(80% 0.075 200);
+		--m3-on-primary: oklch(26% 0.055 200);
+		--m3-primary-container: oklch(36% 0.065 200);
+		--m3-on-primary-container: oklch(91% 0.055 200);
+		--m3-secondary: oklch(82% 0.03 210);
+		--m3-on-secondary: oklch(25% 0.03 210);
+		--m3-secondary-container: oklch(35% 0.032 210);
+		--m3-on-secondary-container: oklch(90% 0.03 210);
+		--m3-tertiary: oklch(82% 0.055 300);
+		--m3-on-tertiary: oklch(27% 0.055 300);
+		--m3-tertiary-container: oklch(38% 0.06 300);
+		--m3-on-tertiary-container: oklch(91% 0.05 300);
+		--m3-error: oklch(78% 0.11 25);
+		--m3-on-error: oklch(30% 0.12 28);
+		--m3-error-container: oklch(38% 0.14 28);
+		--m3-on-error-container: oklch(92% 0.05 25);
+		--m3-surface-dim: oklch(18% 0.012 220);
+		--m3-surface: oklch(18% 0.012 220);
+		--m3-surface-bright: oklch(30% 0.014 218);
+		--m3-surface-container-lowest: oklch(15% 0.01 220);
+		--m3-surface-container-low: oklch(21% 0.012 220);
+		--m3-surface-container: oklch(23% 0.013 219);
+		--m3-surface-container-high: oklch(26% 0.014 219);
+		--m3-surface-container-highest: oklch(29% 0.015 218);
+		--m3-on-surface: oklch(91% 0.01 212);
+		--m3-on-surface-variant: oklch(76% 0.018 214);
+		--m3-outline: oklch(60% 0.018 215);
+		--m3-outline-variant: oklch(35% 0.018 217);
+		--m3-inverse-surface: oklch(91% 0.01 212);
+		--m3-inverse-on-surface: oklch(28% 0.012 220);
+		--m3-inverse-primary: oklch(48% 0.085 200);
+		--m3-success: oklch(78% 0.12 150);
+		--m3-warning: oklch(80% 0.1 80);
+		--tint-twitter-bg: oklch(35% 0.07 240);
+		--tint-twitter-fg: oklch(88% 0.06 230);
+		--tint-reddit-bg: oklch(36% 0.08 40);
+		--tint-reddit-fg: oklch(88% 0.07 45);
+		--tint-instagram-bg: oklch(36% 0.08 340);
+		--tint-instagram-fg: oklch(88% 0.07 340);
+		--tint-whatsapp-bg: oklch(33% 0.07 150);
+		--tint-whatsapp-fg: oklch(88% 0.07 150);
+		--chart-twitter: oklch(64% 0.125 245);
+		--chart-reddit: oklch(66% 0.13 55);
+		--chart-instagram: oklch(58% 0.14 325);
+		--chart-whatsapp: oklch(63% 0.125 150);
+	}
+}
+
+:root[data-theme='dark'] {
+	--m3-primary: oklch(80% 0.075 200);
+	--m3-on-primary: oklch(26% 0.055 200);
+	--m3-primary-container: oklch(36% 0.065 200);
+	--m3-on-primary-container: oklch(91% 0.055 200);
+	--m3-secondary: oklch(82% 0.03 210);
+	--m3-on-secondary: oklch(25% 0.03 210);
+	--m3-secondary-container: oklch(35% 0.032 210);
+	--m3-on-secondary-container: oklch(90% 0.03 210);
+	--m3-tertiary: oklch(82% 0.055 300);
+	--m3-on-tertiary: oklch(27% 0.055 300);
+	--m3-tertiary-container: oklch(38% 0.06 300);
+	--m3-on-tertiary-container: oklch(91% 0.05 300);
+	--m3-error: oklch(78% 0.11 25);
+	--m3-on-error: oklch(30% 0.12 28);
+	--m3-error-container: oklch(38% 0.14 28);
+	--m3-on-error-container: oklch(92% 0.05 25);
+	--m3-surface-dim: oklch(18% 0.012 220);
+	--m3-surface: oklch(18% 0.012 220);
+	--m3-surface-bright: oklch(30% 0.014 218);
+	--m3-surface-container-lowest: oklch(15% 0.01 220);
+	--m3-surface-container-low: oklch(21% 0.012 220);
+	--m3-surface-container: oklch(23% 0.013 219);
+	--m3-surface-container-high: oklch(26% 0.014 219);
+	--m3-surface-container-highest: oklch(29% 0.015 218);
+	--m3-on-surface: oklch(91% 0.01 212);
+	--m3-on-surface-variant: oklch(76% 0.018 214);
+	--m3-outline: oklch(60% 0.018 215);
+	--m3-outline-variant: oklch(35% 0.018 217);
+	--m3-inverse-surface: oklch(91% 0.01 212);
+	--m3-inverse-on-surface: oklch(28% 0.012 220);
+	--m3-inverse-primary: oklch(48% 0.085 200);
+	--m3-success: oklch(78% 0.12 150);
+	--m3-warning: oklch(80% 0.1 80);
+	--tint-twitter-bg: oklch(35% 0.07 240);
+	--tint-twitter-fg: oklch(88% 0.06 230);
+	--tint-reddit-bg: oklch(36% 0.08 40);
+	--tint-reddit-fg: oklch(88% 0.07 45);
+	--tint-instagram-bg: oklch(36% 0.08 340);
+	--tint-instagram-fg: oklch(88% 0.07 340);
+	--tint-whatsapp-bg: oklch(33% 0.07 150);
+	--tint-whatsapp-fg: oklch(88% 0.07 150);
+	--chart-twitter: oklch(64% 0.125 245);
+	--chart-reddit: oklch(66% 0.13 55);
+	--chart-instagram: oklch(58% 0.14 325);
+	--chart-whatsapp: oklch(63% 0.125 150);
+}
+
+@theme inline {
+	/* Color roles — usable as bg-primary, text-on-surface, border-outline-variant, ... */
+	--color-primary: var(--m3-primary);
+	--color-on-primary: var(--m3-on-primary);
+	--color-primary-container: var(--m3-primary-container);
+	--color-on-primary-container: var(--m3-on-primary-container);
+	--color-secondary: var(--m3-secondary);
+	--color-on-secondary: var(--m3-on-secondary);
+	--color-secondary-container: var(--m3-secondary-container);
+	--color-on-secondary-container: var(--m3-on-secondary-container);
+	--color-tertiary: var(--m3-tertiary);
+	--color-on-tertiary: var(--m3-on-tertiary);
+	--color-tertiary-container: var(--m3-tertiary-container);
+	--color-on-tertiary-container: var(--m3-on-tertiary-container);
+	--color-error: var(--m3-error);
+	--color-on-error: var(--m3-on-error);
+	--color-error-container: var(--m3-error-container);
+	--color-on-error-container: var(--m3-on-error-container);
+	--color-surface-dim: var(--m3-surface-dim);
+	--color-surface: var(--m3-surface);
+	--color-surface-bright: var(--m3-surface-bright);
+	--color-surface-container-lowest: var(--m3-surface-container-lowest);
+	--color-surface-container-low: var(--m3-surface-container-low);
+	--color-surface-container: var(--m3-surface-container);
+	--color-surface-container-high: var(--m3-surface-container-high);
+	--color-surface-container-highest: var(--m3-surface-container-highest);
+	--color-on-surface: var(--m3-on-surface);
+	--color-on-surface-variant: var(--m3-on-surface-variant);
+	--color-outline: var(--m3-outline);
+	--color-outline-variant: var(--m3-outline-variant);
+	--color-inverse-surface: var(--m3-inverse-surface);
+	--color-inverse-on-surface: var(--m3-inverse-on-surface);
+	--color-inverse-primary: var(--m3-inverse-primary);
+	--color-scrim: var(--m3-scrim);
+	--color-success: var(--m3-success);
+	--color-warning: var(--m3-warning);
+
+	/* M3 shape scale */
+	--radius-xs: 4px;
+	--radius-sm: 8px;
+	--radius-md: 12px;
+	--radius-lg: 16px;
+	--radius-xl: 28px;
+	--radius-full: 9999px;
+
+	/* Type scale (M3, compact-biased for a data-dense app) */
+	--text-display: 2.8rem;
+	--text-display--line-height: 3.25rem;
+	--text-headline: 1.75rem;
+	--text-headline--line-height: 2.25rem;
+	--text-title-lg: 1.375rem;
+	--text-title-lg--line-height: 1.75rem;
+	--text-title: 1rem;
+	--text-title--line-height: 1.5rem;
+	--text-title--font-weight: 500;
+	--text-body-lg: 1rem;
+	--text-body-lg--line-height: 1.5rem;
+	--text-body: 0.875rem;
+	--text-body--line-height: 1.3125rem;
+	--text-label-lg: 0.875rem;
+	--text-label-lg--line-height: 1.25rem;
+	--text-label-lg--font-weight: 500;
+	--text-label: 0.75rem;
+	--text-label--line-height: 1rem;
+	--text-label--font-weight: 500;
+
+	--font-sans: 'Roboto', 'Noto Sans', system-ui, -apple-system, sans-serif;
+
+	/* Elevation (M3 levels 1-3) */
+	--shadow-e1: 0 1px 2px 0 oklch(0% 0 0 / 0.3), 0 1px 3px 1px oklch(0% 0 0 / 0.15);
+	--shadow-e2: 0 1px 2px 0 oklch(0% 0 0 / 0.3), 0 2px 6px 2px oklch(0% 0 0 / 0.15);
+	--shadow-e3: 0 1px 3px 0 oklch(0% 0 0 / 0.3), 0 4px 8px 3px oklch(0% 0 0 / 0.15);
+
+	/* Motion */
+	--ease-standard: cubic-bezier(0.2, 0, 0, 1);
+	--ease-emphasized: cubic-bezier(0.05, 0.7, 0.1, 1);
+}
+
+body {
+	background-color: var(--m3-surface);
+	color: var(--m3-on-surface);
+	font-family: var(--font-sans);
+	-webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+	outline: 2px solid var(--m3-primary);
+	outline-offset: 2px;
+}
+
+/* M3 state layers: hover/press tints driven by currentColor over the component */
+.state-layer {
+	position: relative;
+}
+.state-layer::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	background: currentColor;
+	opacity: 0;
+	transition: opacity 120ms var(--ease-standard);
+	pointer-events: none;
+}
+.state-layer:hover::after {
+	opacity: 0.08;
+}
+.state-layer:active::after {
+	opacity: 0.12;
+}
+
+/* Shimmer skeleton */
+@keyframes shimmer {
+	from {
+		background-position: 200% 0;
+	}
+	to {
+		background-position: -200% 0;
+	}
+}
+.shimmer {
+	background: linear-gradient(
+		100deg,
+		var(--m3-surface-container) 40%,
+		var(--m3-surface-container-high) 50%,
+		var(--m3-surface-container) 60%
+	);
+	background-size: 200% 100%;
+	animation: shimmer 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.shimmer {
+		animation: none;
+	}
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0.01ms !important;
+		animation-duration: 0.01ms !important;
+	}
+}

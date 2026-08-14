@@ -22,8 +22,11 @@ TELEGRAM_CHAT_ERRORS = int(os.getenv("TELEGRAM_CHAT_ERRORS", "0")) or None
 TELEGRAM_MAX_FILE_SIZE_MB = int(os.getenv("TELEGRAM_MAX_FILE_SIZE_MB", "50"))
 TELEGRAM_BOT_API_URL = os.getenv("TELEGRAM_BOT_API_URL", "")
 
+# Every platform this build serves; each owns a database, a worker, and a schedule row
+PLATFORMS = ("instagram", "reddit", "twitter", "whatsapp")
+
 # Behavior
-CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "240"))  # 4 hours
+CHECK_INTERVAL_MINUTES = int(os.getenv("CHECK_INTERVAL_MINUTES", "240"))  # seeds new schedules; per-platform in the UI
 # A restart should not trigger a fetch; the daemon waits for its first interval
 RUN_ON_START = os.getenv("RUN_ON_START", "false").lower() == "true"
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "200"))
@@ -36,10 +39,31 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 VLM_MODEL = os.getenv("VLM_MODEL", "google/gemini-2.5-flash-lite")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
-VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-3-flash-preview")
+VERTEX_MODEL = os.getenv("VERTEX_MODEL", "gemini-3.1-pro-preview")
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "global")
-EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "300"))
+# Flex is half Standard's price for the same models, synchronously, so it is the
+# default; Standard or Priority trade cost for latency guarantees this workload
+# does not need.
+VERTEX_SERVICE_TIER = os.getenv("VERTEX_SERVICE_TIER", "SERVICE_TIER_FLEX")
+# Capture the model's reasoning trace alongside each caption. On, the traces form
+# a distillation dataset (at the cost of the reasoning tokens); off is cheaper.
+VLM_CAPTURE_REASONING = os.getenv("VLM_CAPTURE_REASONING", "true").lower() == "true"
+VLM_MAX_OUTPUT_TOKENS = int(os.getenv("VLM_MAX_OUTPUT_TOKENS", "65536"))
+EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "900"))
+
+# How many VLM calls run at once. Vertex serves well above this concurrency; the
+# practical limit is transient 503s, which each call retries through.
+EMBED_CONCURRENCY = int(os.getenv("EMBED_CONCURRENCY", "8"))
+# Media items per call, bounding the output a single call must produce. A thread
+# with more is split across calls, each carrying the full thread text.
+EMBED_MAX_MEDIA_PER_CALL = int(os.getenv("EMBED_MAX_MEDIA_PER_CALL", "20"))
+# A safety ceiling on context for pathological threads; real threads sit far
+# under it, so it never bites normally.
+VLM_MAX_CONTEXT_POSTS = int(os.getenv("VLM_MAX_CONTEXT_POSTS", "3000"))
+# Vertex accepts a 500 MB request payload and base64 inflates ~33%, so cap the
+# raw file below that. Larger media is indexed on its text alone.
+VLM_MAX_MEDIA_BYTES = int(os.getenv("VLM_MAX_MEDIA_BYTES", str(360 * 1024 * 1024)))
 
 # Embedding and reranking run on a separate OpenAI-compatible server, so the archiver
 # needs no ML runtime of its own. vLLM, llama.cpp and TEI all serve these shapes.

@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from social_archiver.core.database import Item
+from social_archiver.core.database import Database, Item
 from social_archiver.platforms.whatsapp import config
 
 PLATFORM = "whatsapp"
@@ -30,3 +30,26 @@ class WhatsAppPort:
 
     def upload_order(self, item: Item) -> tuple:
         return (item.created_at or _EPOCH,)
+
+    def embed_thread_key(self, item: Item) -> str:
+        return item.thread_root_id or item.item_id
+
+    def embed_category(self, item: Item, loop_category: str) -> str:
+        return item.category
+
+    async def embed_collect_media(self, db: Database, item: Item) -> list[Path]:
+        """Only what is still on disk. WhatsApp media lives encrypted on a CDN
+        that expires it, so a missing file is a permanent loss, not a restorable
+        one: the message is captioned on its text alone rather than failing."""
+        return [path for path in item.local_paths if path.exists()]
+
+    async def embed_extra_context(self, db: Database, members: list[Item]) -> list[Item]:
+        return []
+
+    def embed_label(self, item: Item, context: dict[str, Item]) -> str:
+        label = f"[tweet_id:{item.item_id}] {item.author_username}"
+        if item.chat_name and item.chat_name != item.author_username:
+            label += f" in {item.chat_name}"
+        if text := (item.text or "").strip():
+            label += f": {text}"
+        return label

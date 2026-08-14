@@ -6,10 +6,13 @@ from pathlib import Path
 import httpx
 
 from social_archiver.llm._backoff import retry_wait
+from social_archiver.llm.vlm_types import MediaResult, VlmStatus
 
 logger = logging.getLogger(__name__)
 
 GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+_REFUSAL_FINISH_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"})
 
 IMAGE_DESCRIPTION_PROMPT = """Describe this image in detail in English. Include:
 - Main subjects and their appearance
@@ -43,10 +46,18 @@ class GeminiClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> str | None:
+    @property
+    def provider(self) -> str:
+        return "gemini"
+
+    @property
+    def params(self) -> dict:
+        return {"safety": "off"}
+
+    async def describe_media(self, media_path: Path, media_type: str, thread_context: str | None = None) -> MediaResult:
         if not media_path.exists():
             logger.error(f"Media file not found: {media_path}")
-            return None
+            return MediaResult(VlmStatus.FAILED, None, None, None, {}, "media file not found")
 
         media_b64 = base64.b64encode(media_path.read_bytes()).decode("utf-8")
 
@@ -58,7 +69,7 @@ class GeminiClient:
             prompt = VIDEO_DESCRIPTION_PROMPT
         else:
             logger.error(f"Unknown media type: {media_type}")
-            return None
+            return MediaResult(VlmStatus.FAILED, None, None, None, {}, f"unknown media type: {media_type}")
 
         payload = {
             "contents": [{"parts": [{"inline_data": {"mime_type": mime_type, "data": media_b64}}, {"text": prompt}]}],
@@ -97,7 +108,7 @@ class GeminiClient:
             ".3gpp": "video/3gpp",
         }.get(path.suffix.lower(), "video/mp4")
 
-    async def _call_gemini(self, payload: dict) -> str | None:
+    async def _call_gemini(self, payload: dict) -> MediaResult:
         url = f"{GEMINI_API_BASE_URL}/models/{self.model}:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
 
@@ -108,7 +119,7 @@ class GeminiClient:
 
                     if response.status_code in (401, 403):
                         logger.error(f"Auth error ({response.status_code}): {response.text[:200]}")
-                        return None
+                        return MediaResult(VlmStatus.FAILED, None, None, None, {}, f"auth error {response.status_code}")
 
                     if response.status_code == 429:
                         wait = retry_wait(attempt)
@@ -119,20 +130,23 @@ class GeminiClient:
                     response.raise_for_status()
                     data = response.json()
 
+                    if (block := data.get("promptFeedback", {}).get("blockReason")):
+                        return MediaResult(VlmStatus.REFUSED, None, None, f"prompt_blocked:{block}", {}, f"prompt blocked: {block}")
+
                     candidates = data.get("candidates")
                     if not candidates:
-                        logger.warning(f"No candidates in response: {data}")
-                        return None
+                        return MediaResult(VlmStatus.FAILED, None, None, None, {}, "no candidates returned")
 
                     candidate = candidates[0]
-                    if "content" not in candidate:
-                        logger.warning(
-                            f"No content in candidate, finishReason: {candidate.get('finishReason', 'UNKNOWN')}"
-                        )
-                        return None
+                    finish = candidate.get("finishReason")
+                    parts = candidate.get("content", {}).get("parts", [])
+                    text = "".join(p.get("text", "") for p in parts if "text" in p).strip()
 
-                    parts = candidate["content"].get("parts", [])
-                    return "".join(p.get("text", "") for p in parts if "text" in p)
+                    if finish in _REFUSAL_FINISH_REASONS:
+                        return MediaResult(VlmStatus.REFUSED, None, None, finish, {}, f"blocked: {finish}")
+                    if not text:
+                        return MediaResult(VlmStatus.FAILED, None, None, finish, {}, f"empty answer (finish={finish})")
+                    return MediaResult(VlmStatus.SUCCESS, text, None, finish, {}, None)
 
             except httpx.TimeoutException:
                 wait = retry_wait(attempt)
@@ -141,9 +155,9 @@ class GeminiClient:
             except Exception as e:
                 if attempt >= self.max_retries:
                     logger.error(f"Failed after {self.max_retries} attempts: {e}")
-                    return None
+                    return MediaResult(VlmStatus.FAILED, None, None, None, {}, str(e))
                 wait = retry_wait(attempt)
                 logger.warning(f"Error: {e}, retrying in {wait}s")
                 await asyncio.sleep(wait)
 
-        return None
+        return MediaResult(VlmStatus.FAILED, None, None, None, {}, "retries exhausted")

@@ -18,7 +18,16 @@ WORKDIR /src
 COPY wabridge/ ./
 RUN go build -o /wabridge .
 
-# Stage 3: runtime
+# Stage 3: the viewer, a static SvelteKit build the API serves
+FROM oven/bun:1-slim AS frontend
+
+WORKDIR /fe
+COPY frontend/package.json frontend/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY frontend/ ./
+RUN bun run build
+
+# Stage 4: runtime
 FROM python:3.13-slim
 
 # yt-dlp muxes with ffmpeg; without it every video download fails at the last step
@@ -31,6 +40,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --from=bridge /wabridge /usr/local/bin/wabridge
 COPY social_archiver ./social_archiver
 COPY scripts ./scripts
+COPY --from=frontend /fe/build ./frontend/build
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -40,4 +50,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 VOLUME ["/data", "/downloads", "/logs"]
 
-CMD ["python", "-m", "social_archiver.web"]
+CMD ["python", "-m", "social_archiver.api"]
