@@ -133,7 +133,9 @@ async def cleanup_downloads(db: Database, port: PlatformPort):
     if not config.CLEANUP_DOWNLOADS:
         return
 
-    items = await db.cleanup_candidates(port.platform, require_embed=config.EMBEDDING_ENABLED)
+    items = await db.cleanup_candidates(
+        port.platform, require_caption=config.CAPTIONING_ENABLED, require_embed=config.EMBEDDING_ENABLED
+    )
     for item in items:
         for path in item.local_paths:
             path.unlink(missing_ok=True)

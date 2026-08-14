@@ -3,6 +3,7 @@ import os
 from social_archiver.core.config import (
     DATA_DIR,
     DOWNLOADS_DIR,
+    CAPTIONING_ENABLED,
     EMBEDDING_ENABLED,
     LOGS_DIR,
     TELEGRAM_BOT_TOKEN,
@@ -66,6 +67,11 @@ def validate_source():
 def validate_upload():
     require(TELEGRAM_BOT_TOKEN=TELEGRAM_BOT_TOKEN)
     _require_a_channel()
+
+
+def validate_caption():
+    if not CAPTIONING_ENABLED:
+        raise ConfigError("CAPTIONING_ENABLED is false; enable it to use the caption job")
 
 
 def validate_embed():

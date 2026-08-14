@@ -194,6 +194,19 @@ MIGRATIONS = (
         """,
         "CREATE INDEX IF NOT EXISTS idx_vlm_traces_platform_status ON vlm_traces(platform, status)",
     ),
+    # Captioning is its own stage, independent of building the search index: the
+    # VLM captions a media item (caption_status), and only later is that caption
+    # embedded into the vector index (embed_status). Split, captioning needs no
+    # embedding server, and each stage retries on its own. Items already done
+    # under the old combined stage are captioned and indexed, so backfill both.
+    (
+        "ALTER TABLE items ADD COLUMN caption_status TEXT NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE items ADD COLUMN caption_error TEXT",
+        "ALTER TABLE items ADD COLUMN captioned_at TIMESTAMP",
+        "CREATE INDEX IF NOT EXISTS idx_items_caption_status ON items(platform, caption_status)",
+        "UPDATE items SET caption_status = 'done', captioned_at = embedded_at "
+        "WHERE embed_status = 'done' AND vlm_description IS NOT NULL",
+    ),
 )
 
 
@@ -274,12 +287,15 @@ class Item:
 
     archive_status: ArchiveStatus = ArchiveStatus.PENDING
     upload_status: StageStatus = StageStatus.PENDING
+    caption_status: StageStatus = StageStatus.PENDING
     embed_status: StageStatus = StageStatus.PENDING
     archive_error: str | None = None
     upload_error: str | None = None
+    caption_error: str | None = None
     embed_error: str | None = None
     archive_attempts: int = 0
 
+    captioned_at: datetime | None = None
     local_paths: list[Path] = field(default_factory=list)
     telegram_message_ids: list[int] = field(default_factory=list)
     vlm_description: str | None = None
@@ -326,11 +342,14 @@ class Item:
             source_target=row["source_target"],
             archive_status=ArchiveStatus(row["archive_status"]),
             upload_status=StageStatus(row["upload_status"]),
+            caption_status=StageStatus(row["caption_status"]),
             embed_status=StageStatus(row["embed_status"]),
             archive_error=row["archive_error"],
             upload_error=row["upload_error"],
+            caption_error=row["caption_error"],
             embed_error=row["embed_error"],
             archive_attempts=row["archive_attempts"],
+            captioned_at=datetime.fromisoformat(row["captioned_at"]) if row["captioned_at"] else None,
             local_paths=[Path(p) for p in json.loads(row["local_paths"] or "[]")],
             telegram_message_ids=json.loads(row["telegram_message_ids"] or "[]"),
             vlm_description=row["vlm_description"],
@@ -630,10 +649,25 @@ class Database:
     async def pending_upload(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
         return await self._pending_stage("upload_status", platform, category, include_failed)
 
-    async def pending_embed(
+    async def pending_caption(
         self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
     ) -> list[Item]:
-        return await self._pending_stage("embed_status", platform, category, include_failed, include_refused)
+        return await self._pending_stage("caption_status", platform, category, include_failed, include_refused)
+
+    async def pending_embed(self, platform: str, category: str, include_failed: bool = False) -> list[Item]:
+        """Items captioned but not yet in the vector index. Indexing follows
+        captioning, so an item is never embedded before it has a caption."""
+        statuses = ["pending", "failed"] if include_failed else ["pending"]
+        placeholders = ", ".join("?" * len(statuses))
+        return await self._select_items(
+            f"""
+            SELECT * FROM items
+            WHERE platform = ? AND category = ? AND archive_status = 'archived'
+            AND caption_status = 'done' AND embed_status IN ({placeholders})
+            ORDER BY created_at
+            """,
+            (platform, category, *statuses),
+        )
 
     async def items_by_ids(self, platform: str, item_ids: set[str]) -> list[Item]:
         """Archived items by primary key, for context that lives outside the
@@ -673,14 +707,18 @@ class Database:
             (platform, *root_ids, *root_ids),
         )
 
-    async def cleanup_candidates(self, platform: str, require_embed: bool) -> list[Item]:
-        """Items whose downloads every enabled consumer has finished with."""
-        embed_filter = "AND embed_status IN ('done', 'skipped')" if require_embed else ""
+    async def cleanup_candidates(self, platform: str, require_caption: bool, require_embed: bool) -> list[Item]:
+        """Items whose downloads every enabled consumer has finished with.
+        Captioning reads the media, so its downloads are kept until it is done
+        too — otherwise a caption-later run would find the media gone."""
+        done = "IN ('done', 'skipped')"
+        caption_filter = f"AND caption_status {done}" if require_caption else ""
+        embed_filter = f"AND embed_status {done}" if require_embed else ""
         return await self._select_items(
             f"""
             SELECT * FROM items
             WHERE platform = ? AND local_paths IS NOT NULL
-            AND upload_status IN ('done', 'skipped') {embed_filter}
+            AND upload_status {done} {caption_filter} {embed_filter}
             """,
             (platform,),
         )
@@ -785,6 +823,32 @@ class Database:
         )
         await self._connection.commit()
 
+    async def mark_captioned(self, item_id: str, vlm_description: str | None = None):
+        await self._connection.execute(
+            """
+            UPDATE items SET caption_status = 'done', captioned_at = ?, vlm_description = ?, caption_error = NULL
+            WHERE item_id = ?
+            """,
+            (datetime.now().isoformat(), vlm_description, item_id),
+        )
+        await self._connection.commit()
+
+    async def mark_caption_failed(self, item_id: str, error: str):
+        await self._connection.execute(
+            "UPDATE items SET caption_status = 'failed', caption_error = ? WHERE item_id = ?",
+            (error, item_id),
+        )
+        await self._connection.commit()
+
+    async def mark_caption_refused(self, item_id: str, reason: str):
+        """The VLM declined this content. Distinct from failed so a later pass
+        can retry refusals on their own."""
+        await self._connection.execute(
+            "UPDATE items SET caption_status = 'refused', caption_error = ? WHERE item_id = ?",
+            (reason, item_id),
+        )
+        await self._connection.commit()
+
     async def mark_embedded(self, item_id: str, vlm_description: str | None = None):
         await self._connection.execute(
             """
@@ -799,15 +863,6 @@ class Database:
         await self._connection.execute(
             "UPDATE items SET embed_status = 'failed', embed_error = ? WHERE item_id = ?",
             (error, item_id),
-        )
-        await self._connection.commit()
-
-    async def mark_embed_refused(self, item_id: str, reason: str):
-        """The VLM declined this content. Distinct from failed so a later pass
-        can retry refusals on their own."""
-        await self._connection.execute(
-            "UPDATE items SET embed_status = 'refused', embed_error = ? WHERE item_id = ?",
-            (reason, item_id),
         )
         await self._connection.commit()
 

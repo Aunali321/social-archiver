@@ -6,7 +6,7 @@ from social_archiver.core.cli import build_parser
 from social_archiver.core.config import ConfigError
 from social_archiver.core.utils import setup_logging
 from social_archiver.platforms.reddit import config
-from social_archiver.platforms.reddit.service import archive, embed, run_all, source, upload
+from social_archiver.platforms.reddit.service import archive, caption, embed, run_all, source, upload
 from social_archiver.platforms.reddit.sources import RedditSourceFetcher
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,10 @@ def main():
             asyncio.run(archive(args.history, args.category, args.retry_failed))
         case "upload":
             asyncio.run(upload(args.retry_failed))
+        case "caption":
+            asyncio.run(caption(args.retry_failed, args.retry_refused, args.limit))
         case "embed":
-            asyncio.run(embed(args.retry_failed, args.retry_refused))
+            asyncio.run(embed(args.retry_failed))
         case "source":
             asyncio.run(source(args.target, args.kind, args.full, args.no_media))
         case "run":

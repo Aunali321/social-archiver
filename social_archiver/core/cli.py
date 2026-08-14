@@ -22,11 +22,15 @@ def build_parser(
     upload = commands.add_parser("upload", help="Send archived items to their Telegram channels")
     upload.add_argument("--retry-failed", action="store_true", help="Also retry items whose upload previously failed")
 
-    embed = commands.add_parser("embed", help="Generate VLM descriptions and search embeddings")
-    embed.add_argument("--retry-failed", action="store_true", help="Also retry items whose embedding previously failed")
-    embed.add_argument(
+    caption = commands.add_parser("caption", help="Generate VLM descriptions (captions) for archived media")
+    caption.add_argument("--retry-failed", action="store_true", help="Also retry items whose captioning previously failed")
+    caption.add_argument(
         "--retry-refused", action="store_true", help="Also retry items the VLM previously declined on safety/policy"
     )
+    caption.add_argument("--limit", type=int, help="Caption at most this many items (a controlled sample run)")
+
+    embed = commands.add_parser("embed", help="Embed captions into the vector search index")
+    embed.add_argument("--retry-failed", action="store_true", help="Also retry items whose indexing previously failed")
 
     if source_kinds:
         source = commands.add_parser("source", help="Archive an account or subreddit in full")

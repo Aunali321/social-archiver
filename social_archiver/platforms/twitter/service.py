@@ -11,7 +11,8 @@ from social_archiver.llm.factory import create_vlm_client
 from social_archiver.platforms.twitter import config
 from social_archiver.platforms.twitter.archiver import ArchiveJob
 from social_archiver.platforms.twitter.client import TwitterClient
-from social_archiver.platforms.twitter.embedder import EmbedJob
+from social_archiver.core.caption import CaptionJob
+from social_archiver.core.embed import IndexJob
 from social_archiver.platforms.twitter.port import TwitterPort
 from social_archiver.platforms.twitter.sources import TwitterSourceFetcher
 
@@ -59,16 +60,22 @@ async def upload(retry_failed: bool = False):
         await cleanup_downloads(db, PORT)
 
 
-async def embed(retry_failed: bool = False, retry_refused: bool = False):
-    config.validate_embed()
+async def caption(retry_failed: bool = False, retry_refused: bool = False, limit: int | None = None):
+    config.validate_caption()
     vlm_client, model_name = create_vlm_client(config.VLM_PROVIDER)
-    logger.info(f"Embedding with provider={config.VLM_PROVIDER}, model={model_name}")
+    logger.info(f"Captioning with provider={config.VLM_PROVIDER}, model={model_name}")
+    async with Database(config.DATABASE_PATH) as db:
+        await CaptionJob(db, vlm_client, PORT).run(retry_failed, retry_refused, limit)
+        await cleanup_downloads(db, PORT)
 
+
+async def embed(retry_failed: bool = False):
+    config.validate_embed()
     milvus = MilvusManager(uri=config.TWITTER_MILVUS_URI, collections=MILVUS_COLLECTIONS)
     milvus.initialize_collections()
     try:
         async with Database(config.DATABASE_PATH) as db:
-            await EmbedJob(db, vlm_client, milvus, PORT).run(retry_failed, retry_refused)
+            await IndexJob(db, milvus, PORT).run(retry_failed)
             await cleanup_downloads(db, PORT)
     finally:
         milvus.close()
@@ -76,10 +83,13 @@ async def embed(retry_failed: bool = False, retry_refused: bool = False):
 
 async def run_all(fetch_all: bool = False):
     jobs = {"archive": lambda: archive(fetch_all)}
-    # Uploading and embedding are opt-in: without a bot token or an embedding server
-    # there is nothing for them to do, and archiving does not depend on either.
+    # Uploading, captioning and indexing are opt-in: without a bot token, or with
+    # their stages disabled, there is nothing for them to do, and archiving does
+    # not depend on any of them.
     if config.TELEGRAM_BOT_TOKEN:
         jobs["upload"] = upload
+    if config.CAPTIONING_ENABLED:
+        jobs["caption"] = caption
     if config.EMBEDDING_ENABLED:
         jobs["embed"] = embed
     await run_jobs(jobs)

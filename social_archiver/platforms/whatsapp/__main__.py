@@ -7,7 +7,7 @@ from social_archiver.core.config import ConfigError
 from social_archiver.core.utils import setup_logging
 from social_archiver.platforms.whatsapp import config
 from social_archiver.platforms.whatsapp.archiver import CATEGORIES
-from social_archiver.platforms.whatsapp.service import archive, embed, run_all, upload
+from social_archiver.platforms.whatsapp.service import archive, caption, embed, run_all, upload
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +22,10 @@ def main():
             asyncio.run(archive(args.history, args.category, args.retry_failed))
         case "upload":
             asyncio.run(upload(args.retry_failed))
+        case "caption":
+            asyncio.run(caption(args.retry_failed, args.retry_refused, args.limit))
         case "embed":
-            asyncio.run(embed(args.retry_failed, args.retry_refused))
+            asyncio.run(embed(args.retry_failed))
         case "run":
             asyncio.run(run_all(args.history))
 

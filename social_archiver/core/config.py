@@ -32,7 +32,11 @@ RUN_ON_START = os.getenv("RUN_ON_START", "false").lower() == "true"
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "200"))
 CLEANUP_DOWNLOADS = os.getenv("CLEANUP_DOWNLOADS", "true").lower() == "true"
 
-# Embedding / VLM
+# Captioning / VLM
+# Captioning (VLM descriptions + traces) and search indexing (embed into Milvus)
+# are separate stages: caption first, index later. Each has its own enable flag
+# so captioning can run with no embedding server, and indexing can wait for one.
+CAPTIONING_ENABLED = os.getenv("CAPTIONING_ENABLED", "false").lower() == "true"
 EMBEDDING_ENABLED = os.getenv("EMBEDDING_ENABLED", "false").lower() == "true"
 VLM_PROVIDER = os.getenv("VLM_PROVIDER", "vertex")  # "openrouter", "gemini", or "vertex"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
