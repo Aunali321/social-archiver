@@ -225,6 +225,18 @@ MIGRATIONS = (
         WHERE vlm_description IS NOT NULL AND vlm_description != ''
         """,
     ),
+    # Raw mode captures the model's own words on the forced-think turn and the
+    # provider's summary on the answering turn, so a trace can hold both: they
+    # come from different turns of the same call and are different artefacts, the
+    # first for training on and the second for reading. Null on either where the
+    # mode or the model did not produce it.
+    # Every trace written before raw mode existed holds a provider summary, so it
+    # moves to the column that says so. Otherwise one field would mix the two and
+    # a later fine-tune would train on both as if they were the same artefact.
+    (
+        "ALTER TABLE vlm_traces ADD COLUMN reasoning_summary TEXT",
+        "UPDATE vlm_traces SET reasoning_summary = reasoning, reasoning = NULL WHERE reasoning IS NOT NULL",
+    ),
 )
 
 
@@ -967,8 +979,8 @@ class Database:
             """
             INSERT INTO vlm_traces
                 (platform, model, provider, status, finish_reason, params,
-                 target_item_ids, input, reasoning, output, usage, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_item_ids, input, reasoning, reasoning_summary, output, usage, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trace.platform,
@@ -980,6 +992,7 @@ class Database:
                 json.dumps(trace.target_item_ids),
                 json.dumps(trace.input),
                 trace.reasoning,
+                trace.reasoning_summary,
                 trace.output,
                 json.dumps(trace.usage),
                 trace.error,

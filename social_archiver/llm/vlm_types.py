@@ -79,6 +79,7 @@ class ThreadResult:
     status: VlmStatus
     captions: ThreadCaptions | None
     reasoning: str | None
+    reasoning_summary: str | None
     raw_output: str | None
     finish_reason: str | None
     usage: dict[str, int]
@@ -92,6 +93,7 @@ class MediaResult:
     status: VlmStatus
     description: str | None
     reasoning: str | None
+    reasoning_summary: str | None
     finish_reason: str | None
     usage: dict[str, int]
     error: str | None = None
@@ -110,6 +112,7 @@ class VlmTrace:
     target_item_ids: list[str]
     input: list[dict]
     reasoning: str | None
+    reasoning_summary: str | None
     output: str | None
     finish_reason: str | None
     status: VlmStatus

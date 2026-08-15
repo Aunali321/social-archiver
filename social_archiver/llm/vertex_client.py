@@ -216,9 +216,8 @@ class VertexVLMClient:
             temperature=0,
             max_output_tokens=self.max_output_tokens,
             service_tier=self.service_tier,
-            thinking_config=self.thinking,
             safety_settings=_SAFETY_SETTINGS,
-            **overrides,
+            **{"thinking_config": self.thinking, **overrides},
         )
 
     async def describe_thread(self, parts: list[ThreadPart]) -> ThreadResult:
@@ -234,17 +233,17 @@ class VertexVLMClient:
             response_json_schema=ThreadCaptions.model_json_schema(),
         )
         if outcome.status is not VlmStatus.SUCCESS:
-            return ThreadResult(outcome.status, None, outcome.reasoning, outcome.text, outcome.finish_reason, outcome.usage, outcome.error)
+            return ThreadResult(outcome.status, None, outcome.reasoning, outcome.reasoning_summary, outcome.text, outcome.finish_reason, outcome.usage, outcome.error)
 
         try:
             captions = ThreadCaptions.model_validate_json(outcome.text or "")
         except Exception as e:
             # A well-formed 200 whose body is not the promised schema is a
             # technical failure, not a refusal: the content came through.
-            return ThreadResult(VlmStatus.FAILED, None, outcome.reasoning, outcome.text, outcome.finish_reason, outcome.usage, f"caption parse failed: {e}")
+            return ThreadResult(VlmStatus.FAILED, None, outcome.reasoning, outcome.reasoning_summary, outcome.text, outcome.finish_reason, outcome.usage, f"caption parse failed: {e}")
 
         logger.info(f"Thread captioned: {len(captions.captions)} media items, finish={outcome.finish_reason}")
-        return ThreadResult(VlmStatus.SUCCESS, captions, outcome.reasoning, outcome.text, outcome.finish_reason, outcome.usage, None)
+        return ThreadResult(VlmStatus.SUCCESS, captions, outcome.reasoning, outcome.reasoning_summary, outcome.text, outcome.finish_reason, outcome.usage, None)
 
     async def describe_media(self, path, media_type: str, thread_context: str | None = None) -> MediaResult:
         """Describe a single image or video. Used where there is no thread to
@@ -260,8 +259,8 @@ class VertexVLMClient:
         outcome = await self._answer(sdk_parts)
         description = (outcome.text or "").strip() or None
         if outcome.status is VlmStatus.SUCCESS and not description:
-            return MediaResult(VlmStatus.FAILED, None, outcome.reasoning, outcome.finish_reason, outcome.usage, "empty description")
-        return MediaResult(outcome.status, description, outcome.reasoning, outcome.finish_reason, outcome.usage, outcome.error)
+            return MediaResult(VlmStatus.FAILED, None, outcome.reasoning, outcome.reasoning_summary, outcome.finish_reason, outcome.usage, "empty description")
+        return MediaResult(outcome.status, description, outcome.reasoning, outcome.reasoning_summary, outcome.finish_reason, outcome.usage, outcome.error)
 
     async def _answer(self, sdk_parts: list[types.Part], **overrides) -> "_Outcome":
         """The call that produces the caption, with whatever reasoning capture is
@@ -283,12 +282,24 @@ class VertexVLMClient:
         contents.append(
             types.Content(role="user", parts=[types.Part.from_function_response(name="think", response={"recorded": True})])
         )
-        outcome = await self._generate(contents, self._config(tools=[_THINK_TOOL], tool_config=_ANSWER, **overrides))
+        # The answering turn has no tool to reason into, so its thinking may run
+        # natively — asking for it here collects the provider's summary as well,
+        # and the two traces are kept apart rather than merged.
+        outcome = await self._generate(
+            contents,
+            self._config(
+                tools=[_THINK_TOOL],
+                tool_config=_ANSWER,
+                thinking_config=types.ThinkingConfig(include_thoughts=True),
+                **overrides,
+            ),
+        )
         # Both turns bill, so the trace carries their sum rather than the answer's alone.
         return _Outcome(
             outcome.status,
             outcome.text,
-            reasoning if not leaked else outcome.reasoning or reasoning,
+            reasoning,
+            outcome.reasoning,
             outcome.finish_reason,
             _merge_usage(_usage(first), outcome.usage),
             outcome.error,
@@ -312,30 +323,33 @@ class VertexVLMClient:
             except (errors.ServerError, errors.APIError) as e:
                 if not _is_transient(e) or attempt >= self.max_retries:
                     logger.error(f"VLM call failed ({_code(e)}): {e}")
-                    return _Outcome(VlmStatus.FAILED, None, None, None, {}, str(e))
+                    return _Outcome(VlmStatus.FAILED, None, None, None, None, {}, str(e))
                 wait = retry_wait(attempt)
                 logger.warning(f"VLM call transient error ({_code(e)}), retrying in {wait}s (attempt {attempt})")
                 await asyncio.sleep(wait)
             except TimeoutError as e:
                 if attempt >= self.max_retries:
-                    return _Outcome(VlmStatus.FAILED, None, None, None, {}, f"timeout: {e}")
+                    return _Outcome(VlmStatus.FAILED, None, None, None, None, {}, f"timeout: {e}")
                 wait = retry_wait(attempt)
                 logger.warning(f"VLM call timeout, retrying in {wait}s (attempt {attempt})")
                 await asyncio.sleep(wait)
 
-        return _Outcome(VlmStatus.FAILED, None, None, None, {}, "retries exhausted")
+        return _Outcome(VlmStatus.FAILED, None, None, None, None, {}, "retries exhausted")
 
 
 class _Outcome:
     """The generic result of a call, before schema validation: status, the
-    answer text, the reasoning, finish reason and usage."""
+    answer text, both reasoning traces, finish reason and usage. `reasoning` is
+    the model's raw trace (raw mode only); `reasoning_summary` is the provider's,
+    which is all a thought part ever contains."""
 
-    __slots__ = ("status", "text", "reasoning", "finish_reason", "usage", "error")
+    __slots__ = ("status", "text", "reasoning", "reasoning_summary", "finish_reason", "usage", "error")
 
-    def __init__(self, status, text, reasoning, finish_reason, usage, error):
+    def __init__(self, status, text, reasoning, reasoning_summary, finish_reason, usage, error):
         self.status = status
         self.text = text
         self.reasoning = reasoning
+        self.reasoning_summary = reasoning_summary
         self.finish_reason = finish_reason
         self.usage = usage
         self.error = error
@@ -370,26 +384,26 @@ def _read_response(response) -> _Outcome:
     feedback = getattr(response, "prompt_feedback", None)
     if feedback is not None and getattr(feedback, "block_reason", None):
         reason = _name(feedback.block_reason)
-        return _Outcome(VlmStatus.REFUSED, None, None, f"prompt_blocked:{reason}", usage, f"prompt blocked: {reason}")
+        return _Outcome(VlmStatus.REFUSED, None, None, None, f"prompt_blocked:{reason}", usage, f"prompt blocked: {reason}")
 
     candidates = response.candidates or []
     if not candidates:
-        return _Outcome(VlmStatus.FAILED, None, None, None, usage, "no candidates returned")
+        return _Outcome(VlmStatus.FAILED, None, None, None, None, usage, "no candidates returned")
 
     candidate = candidates[0]
     finish = _name(candidate.finish_reason)
     parts = getattr(candidate.content, "parts", None) or []
-    reasoning = "".join(p.text for p in parts if getattr(p, "thought", False) and p.text) or None
+    summary = "".join(p.text for p in parts if getattr(p, "thought", False) and p.text) or None
     answer = "".join(p.text for p in parts if not getattr(p, "thought", False) and p.text) or None
 
     if finish in _REFUSAL_FINISH_REASONS:
-        return _Outcome(VlmStatus.REFUSED, answer, reasoning, finish, usage, f"blocked: {finish}")
+        return _Outcome(VlmStatus.REFUSED, answer, None, summary, finish, usage, f"blocked: {finish}")
     if finish == "MAX_TOKENS":
-        return _Outcome(VlmStatus.TRUNCATED, answer, reasoning, finish, usage, "output truncated at token cap")
+        return _Outcome(VlmStatus.TRUNCATED, answer, None, summary, finish, usage, "output truncated at token cap")
     if not answer:
-        return _Outcome(VlmStatus.FAILED, None, reasoning, finish, usage, f"empty answer (finish={finish})")
+        return _Outcome(VlmStatus.FAILED, None, None, summary, finish, usage, f"empty answer (finish={finish})")
 
-    return _Outcome(VlmStatus.SUCCESS, answer, reasoning, finish, usage, None)
+    return _Outcome(VlmStatus.SUCCESS, answer, None, summary, finish, usage, None)
 
 
 def _usage(response) -> dict[str, int]:

@@ -286,6 +286,7 @@ class CaptionJob:
                 target_item_ids=target_ids,
                 input=serialize_parts(parts),
                 reasoning=result.reasoning,
+                reasoning_summary=result.reasoning_summary,
                 output=result.raw_output,
                 finish_reason=result.finish_reason,
                 status=result.status,

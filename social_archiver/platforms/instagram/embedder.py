@@ -110,6 +110,7 @@ class CaptionJob:
                     },
                 ],
                 reasoning=result.reasoning,
+                reasoning_summary=result.reasoning_summary,
                 output=result.description,
                 finish_reason=result.finish_reason,
                 status=result.status,
