@@ -53,6 +53,12 @@ VERTEX_SERVICE_TIER = os.getenv("VERTEX_SERVICE_TIER", "SERVICE_TIER_FLEX")
 # Capture the model's reasoning trace alongside each caption. On, the traces form
 # a distillation dataset (at the cost of the reasoning tokens); off is cheaper.
 VLM_CAPTURE_REASONING = os.getenv("VLM_CAPTURE_REASONING", "true").lower() == "true"
+# Capture the model's own words instead of the provider's summary of them, by
+# closing the hidden thinking channel and forcing a `think` tool the model can
+# only reason into. Costs a second turn per call, and only works on models that
+# honour thinkingBudget=0 — measured: gemini-3.5-flash and gemini-3.1-flash-lite
+# do, gemini-3.7-flash does not, gemini-2.5-pro rejects the setting.
+VLM_RAW_REASONING = os.getenv("VLM_RAW_REASONING", "false").lower() == "true"
 VLM_MAX_OUTPUT_TOKENS = int(os.getenv("VLM_MAX_OUTPUT_TOKENS", "65536"))
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", "900"))
 

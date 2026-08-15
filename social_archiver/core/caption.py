@@ -274,7 +274,7 @@ class CaptionJob:
 
         descriptions = _merge_captions(result.captions)
         for target in targets:
-            await self.db.mark_captioned(target.item_id, descriptions.get(target.item_id))
+            await self.db.mark_captioned(target.item_id, descriptions.get(target.item_id), self.vlm.model)
 
     async def _record_trace(self, parts: list[ThreadPart], target_ids: list[str], result: ThreadResult):
         await self.db.insert_trace(

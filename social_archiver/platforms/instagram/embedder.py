@@ -88,7 +88,7 @@ class CaptionJob:
             await self.db.mark_caption_refused(item.item_id, reason or "refused")
         else:
             joined = "\n\n---\n\n".join(r.description for r in results if r.description)
-            await self.db.mark_captioned(item.item_id, joined or None)
+            await self.db.mark_captioned(item.item_id, joined or None, self.vlm.model)
             logger.info(f"Captioned {item.item_id} (@{item.author_username})")
 
     async def _record_trace(self, item: Item, path: Path, index: int, kind: str, result: MediaResult):

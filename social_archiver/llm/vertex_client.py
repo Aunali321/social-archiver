@@ -8,6 +8,17 @@ fine-tuning set.
 
 Media is sent inline. Vertex accepts a request payload up to 500 MB, so all but
 a handful of very long videos caption directly, without a staging bucket.
+
+The reasoning trace comes back one of two ways. `includeThoughts` returns what
+the provider *summarizes* the thinking as, which reads retrospectively and is not
+the model's own words. Raw mode instead turns native thinking off and forces a
+`think` tool, leaving the model nowhere to reason but the tool arguments, which
+come back as plaintext — its actual working trace. That costs a second turn (the
+forced call produces reasoning but no answer), and only works on models that
+honour `thinkingBudget=0`: measured, 3.5 Flash and 3.1 Flash Lite do, 3.7 Flash
+floors at ~85 thought tokens and yields a plan, and 2.5 Pro rejects the setting
+outright. `thoughtsTokenCount` on the reply is the check, so a trace is never
+recorded as raw when thinking leaked.
 """
 
 import asyncio
@@ -54,6 +65,26 @@ warnings.filterwarnings("ignore", message=".*is not a valid ServiceTier.*", cate
 _REFUSAL_FINISH_REASONS = frozenset(
     {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION", "IMAGE_SAFETY"}
 )
+
+_THINK_TOOL = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="think",
+            description="Private scratchpad. Write your COMPLETE step-by-step reasoning here before answering.",
+            parameters={
+                "type": "object",
+                "properties": {"thoughts": {"type": "string"}},
+                "required": ["thoughts"],
+            },
+        )
+    ]
+)
+# ANY with a single allowed name is what forces the call; AUTO on the second turn
+# lets the model answer instead of reaching for the tool again.
+_FORCE_THINK = types.ToolConfig(
+    function_calling_config=types.FunctionCallingConfig(mode="ANY", allowed_function_names=["think"])
+)
+_ANSWER = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="AUTO"))
 
 _SAFETY_SETTINGS = [
     types.SafetySetting(category=category, threshold="OFF")
@@ -129,6 +160,7 @@ class VertexVLMClient:
         location: str = "global",
         service_tier: str = "SERVICE_TIER_FLEX",
         capture_reasoning: bool = True,
+        raw_reasoning: bool = False,
         max_output_tokens: int = 65536,
         timeout: int = 900,
         max_retries: int = 3,
@@ -137,12 +169,15 @@ class VertexVLMClient:
         self.service_tier = service_tier
         self.max_output_tokens = max_output_tokens
         self.max_retries = max_retries
-        # thinking on captures a reasoning trace alongside the caption; off is
-        # cheaper when only the caption is wanted.
+        self.raw_reasoning = raw_reasoning
+        # Raw mode needs the hidden channel closed, so the model's only place to
+        # reason is the forced tool call. Otherwise thinking on captures the
+        # provider's summary alongside the caption; off is cheaper when only the
+        # caption is wanted.
         self.thinking = (
-            types.ThinkingConfig(include_thoughts=True)
-            if capture_reasoning
-            else types.ThinkingConfig(thinking_budget=0)
+            types.ThinkingConfig(thinking_budget=0)
+            if raw_reasoning or not capture_reasoning
+            else types.ThinkingConfig(include_thoughts=True)
         )
         self.client = genai.Client(
             vertexai=True,
@@ -152,8 +187,14 @@ class VertexVLMClient:
         )
         logger.info(
             f"Vertex VLM initialized: model={model}, tier={service_tier}, "
-            f"reasoning={'on' if capture_reasoning else 'off'}, project={project or '(auto)'}"
+            f"reasoning={self._reasoning_mode}, project={project or '(auto)'}"
         )
+
+    @property
+    def _reasoning_mode(self) -> str:
+        if self.raw_reasoning:
+            return "raw"
+        return "summary" if self.thinking.include_thoughts else "off"
 
     @property
     def provider(self) -> str:
@@ -166,7 +207,7 @@ class VertexVLMClient:
         return {
             "service_tier": self.service_tier,
             "max_output_tokens": self.max_output_tokens,
-            "thinking": "on" if self.thinking.include_thoughts else "off",
+            "thinking": self._reasoning_mode,
             "safety": "off",
         }
 
@@ -187,11 +228,11 @@ class VertexVLMClient:
         sdk_parts = [_to_sdk_part(part) for part in parts]
         sdk_parts.append(types.Part.from_text(text=THREAD_DESCRIPTION_PROMPT))
 
-        config = self._config(
+        outcome = await self._answer(
+            sdk_parts,
             response_mime_type="application/json",
             response_json_schema=ThreadCaptions.model_json_schema(),
         )
-        outcome = await self._generate(sdk_parts, config)
         if outcome.status is not VlmStatus.SUCCESS:
             return ThreadResult(outcome.status, None, outcome.reasoning, outcome.text, outcome.finish_reason, outcome.usage, outcome.error)
 
@@ -212,27 +253,62 @@ class VertexVLMClient:
         if thread_context:
             prompt = f"{thread_context}\n\n{prompt}"
 
-        mime_type = _mime_for(path, media_type)
         sdk_parts = [
-            types.Part.from_bytes(data=path.read_bytes(), mime_type=mime_type),
+            types.Part.from_bytes(data=path.read_bytes(), mime_type=_mime_for(path, media_type)),
             types.Part.from_text(text=prompt),
         ]
-        outcome = await self._generate(sdk_parts, self._config())
+        outcome = await self._answer(sdk_parts)
         description = (outcome.text or "").strip() or None
         if outcome.status is VlmStatus.SUCCESS and not description:
             return MediaResult(VlmStatus.FAILED, None, outcome.reasoning, outcome.finish_reason, outcome.usage, "empty description")
         return MediaResult(outcome.status, description, outcome.reasoning, outcome.finish_reason, outcome.usage, outcome.error)
 
-    async def _generate(self, sdk_parts: list[types.Part], config: types.GenerateContentConfig) -> "_Outcome":
-        """One generate call with transient-failure retries. Refusals and
-        truncations are outcomes, not exceptions, and are returned as such."""
+    async def _answer(self, sdk_parts: list[types.Part], **overrides) -> "_Outcome":
+        """The call that produces the caption, with whatever reasoning capture is
+        configured. Summary mode is one call; raw mode spends a first turn on the
+        forced `think` tool, because a forced call yields reasoning and no answer."""
+        if not self.raw_reasoning:
+            return await self._generate([types.Content(role="user", parts=sdk_parts)], self._config(**overrides))
+
         contents = [types.Content(role="user", parts=sdk_parts)]
+        first = await self._call(contents, self._config(tools=[_THINK_TOOL], tool_config=_FORCE_THINK))
+        if isinstance(first, _Outcome):
+            return first  # the think turn never completed; nothing to answer from
+
+        reasoning, leaked = _read_think(first)
+        if leaked:
+            logger.warning(f"Native thinking leaked {leaked} tokens; the captured trace is a plan, not the reasoning")
+
+        contents.append(first.candidates[0].content)
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_function_response(name="think", response={"recorded": True})])
+        )
+        outcome = await self._generate(contents, self._config(tools=[_THINK_TOOL], tool_config=_ANSWER, **overrides))
+        # Both turns bill, so the trace carries their sum rather than the answer's alone.
+        return _Outcome(
+            outcome.status,
+            outcome.text,
+            reasoning if not leaked else outcome.reasoning or reasoning,
+            outcome.finish_reason,
+            _merge_usage(_usage(first), outcome.usage),
+            outcome.error,
+        )
+
+    async def _generate(self, contents: list[types.Content], config: types.GenerateContentConfig) -> "_Outcome":
+        response = await self._call(contents, config)
+        return response if isinstance(response, _Outcome) else _read_response(response)
+
+    async def _call(
+        self, contents: list[types.Content], config: types.GenerateContentConfig
+    ) -> "types.GenerateContentResponse | _Outcome":
+        """One generate call with transient-failure retries. Returns the raw
+        response, or an `_Outcome` when the call could not be completed at all;
+        refusals and truncations are outcomes read from a successful reply."""
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = await self.client.aio.models.generate_content(
+                return await self.client.aio.models.generate_content(
                     model=self.model, contents=contents, config=config
                 )
-                return _read_response(response)
             except (errors.ServerError, errors.APIError) as e:
                 if not _is_transient(e) or attempt >= self.max_retries:
                     logger.error(f"VLM call failed ({_code(e)}): {e}")
@@ -263,6 +339,29 @@ class _Outcome:
         self.finish_reason = finish_reason
         self.usage = usage
         self.error = error
+
+
+def _read_think(response) -> tuple[str | None, int]:
+    """The forced call's arguments are the trace. `thoughtsTokenCount` is the
+    check that native thinking really stayed off: non-zero means the model kept
+    reasoning privately and wrote only a plan into the tool."""
+    for part in getattr(response.candidates[0].content, "parts", None) or []:
+        call = getattr(part, "function_call", None)
+        if call and call.name == "think":
+            return (call.args or {}).get("thoughts"), _thought_tokens(response)
+    return None, _thought_tokens(response)
+
+
+def _thought_tokens(response) -> int:
+    meta = getattr(response, "usage_metadata", None)
+    return getattr(meta, "thoughts_token_count", None) or 0 if meta else 0
+
+
+def _merge_usage(first: dict[str, int], second: dict[str, int]) -> dict[str, int]:
+    merged = dict(second)
+    for key, value in first.items():
+        merged[key] = merged.get(key, 0) + value
+    return merged
 
 
 def _read_response(response) -> _Outcome:

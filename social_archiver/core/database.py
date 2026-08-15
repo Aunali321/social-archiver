@@ -207,6 +207,24 @@ MIGRATIONS = (
         "UPDATE items SET caption_status = 'done', captioned_at = embedded_at "
         "WHERE embed_status = 'done' AND vlm_description IS NOT NULL",
     ),
+    # Which model wrote a caption, on the item itself. The traces already record
+    # it, but only inside a JSON array of target ids, so "everything the old
+    # model captioned" is not a query — and a trace table holding every input and
+    # output is the first thing pruned for space, taking the attribution with it.
+    # Backfilled from the traces that still hold it; a call captions several
+    # items, so the join goes through target_item_ids.
+    (
+        "ALTER TABLE items ADD COLUMN caption_model TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_items_caption_model ON items(platform, caption_model)",
+        """
+        UPDATE items SET caption_model = (
+            SELECT t.model FROM vlm_traces t, json_each(t.target_item_ids) target
+            WHERE target.value = items.item_id AND t.status = 'success'
+            ORDER BY t.id DESC LIMIT 1
+        )
+        WHERE vlm_description IS NOT NULL AND vlm_description != ''
+        """,
+    ),
 )
 
 
@@ -299,6 +317,7 @@ class Item:
     local_paths: list[Path] = field(default_factory=list)
     telegram_message_ids: list[int] = field(default_factory=list)
     vlm_description: str | None = None
+    caption_model: str | None = None
 
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> Self:
@@ -353,6 +372,7 @@ class Item:
             local_paths=[Path(p) for p in json.loads(row["local_paths"] or "[]")],
             telegram_message_ids=json.loads(row["telegram_message_ids"] or "[]"),
             vlm_description=row["vlm_description"],
+            caption_model=row["caption_model"],
         )
 
 
@@ -894,13 +914,16 @@ class Database:
         )
         await self._connection.commit()
 
-    async def mark_captioned(self, item_id: str, vlm_description: str | None = None):
+    async def mark_captioned(self, item_id: str, vlm_description: str | None = None, model: str | None = None):
+        """`model` is the model that wrote the description; None for an item
+        marked done without a call (text-only, or media that is gone)."""
         await self._connection.execute(
             """
-            UPDATE items SET caption_status = 'done', captioned_at = ?, vlm_description = ?, caption_error = NULL
+            UPDATE items SET caption_status = 'done', captioned_at = ?, vlm_description = ?,
+                             caption_model = ?, caption_error = NULL
             WHERE item_id = ?
             """,
-            (datetime.now().isoformat(), vlm_description, item_id),
+            (datetime.now().isoformat(), vlm_description, model, item_id),
         )
         await self._connection.commit()
 

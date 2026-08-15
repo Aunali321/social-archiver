@@ -20,6 +20,7 @@ def create_vlm_client(provider: str) -> tuple[Any, str]:
             location=config.VERTEX_LOCATION,
             service_tier=config.VERTEX_SERVICE_TIER,
             capture_reasoning=config.VLM_CAPTURE_REASONING,
+            raw_reasoning=config.VLM_RAW_REASONING,
             max_output_tokens=config.VLM_MAX_OUTPUT_TOKENS,
             timeout=config.EMBEDDING_TIMEOUT,
         )
