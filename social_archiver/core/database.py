@@ -233,9 +233,16 @@ MIGRATIONS = (
     # Every trace written before raw mode existed holds a provider summary, so it
     # moves to the column that says so. Otherwise one field would mix the two and
     # a later fine-tune would train on both as if they were the same artefact.
+    # Scoped to traces the params show were not raw, so replaying this step — on a
+    # file restored from a backup taken before it ran — can never move a real raw
+    # trace into the summary column and lose it.
     (
         "ALTER TABLE vlm_traces ADD COLUMN reasoning_summary TEXT",
-        "UPDATE vlm_traces SET reasoning_summary = reasoning, reasoning = NULL WHERE reasoning IS NOT NULL",
+        """
+        UPDATE vlm_traces SET reasoning_summary = reasoning, reasoning = NULL
+        WHERE reasoning IS NOT NULL
+          AND CASE WHEN json_valid(params) THEN json_extract(params, '$.thinking') END IS NOT 'raw'
+        """,
     ),
 )
 
