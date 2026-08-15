@@ -79,12 +79,14 @@ _THINK_TOOL = types.Tool(
         )
     ]
 )
-# ANY with a single allowed name is what forces the call; AUTO on the second turn
-# lets the model answer instead of reaching for the tool again.
+# ANY with a single allowed name is what forces the call. NONE on the answering
+# turn: the tool stays declared, because the history holds its call and response,
+# but the model may not reach for it again — left on AUTO it sometimes thinks
+# twice and returns no text at all, which reads as an empty answer.
 _FORCE_THINK = types.ToolConfig(
     function_calling_config=types.FunctionCallingConfig(mode="ANY", allowed_function_names=["think"])
 )
-_ANSWER = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="AUTO"))
+_ANSWER = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="NONE"))
 
 _SAFETY_SETTINGS = [
     types.SafetySetting(category=category, threshold="OFF")
