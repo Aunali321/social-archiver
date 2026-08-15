@@ -278,10 +278,17 @@ class VertexVLMClient:
         if leaked:
             logger.warning(f"Native thinking leaked {leaked} tokens; the captured trace is a plan, not the reasoning")
 
-        contents.append(first.candidates[0].content)
-        contents.append(
-            types.Content(role="user", parts=[types.Part.from_function_response(name="think", response={"recorded": True})])
-        )
+        model_turn = first.candidates[0].content
+        contents.append(model_turn)
+        # One response per call. The model sometimes reasons across several think
+        # calls, and Vertex rejects the next turn unless the counts match exactly.
+        answered = [
+            types.Part.from_function_response(name=part.function_call.name, response={"recorded": True})
+            for part in (model_turn.parts or [])
+            if getattr(part, "function_call", None)
+        ]
+        if answered:
+            contents.append(types.Content(role="user", parts=answered))
         # The answering turn has no tool to reason into, so its thinking may run
         # natively — asking for it here collects the provider's summary as well,
         # and the two traces are kept apart rather than merged.
@@ -356,14 +363,16 @@ class _Outcome:
 
 
 def _read_think(response) -> tuple[str | None, int]:
-    """The forced call's arguments are the trace. `thoughtsTokenCount` is the
-    check that native thinking really stayed off: non-zero means the model kept
-    reasoning privately and wrote only a plan into the tool."""
-    for part in getattr(response.candidates[0].content, "parts", None) or []:
-        call = getattr(part, "function_call", None)
-        if call and call.name == "think":
-            return (call.args or {}).get("thoughts"), _thought_tokens(response)
-    return None, _thought_tokens(response)
+    """The forced calls' arguments are the trace — several, when the model
+    reasons across more than one call. `thoughtsTokenCount` is the check that
+    native thinking really stayed off: non-zero means the model kept reasoning
+    privately and wrote only a plan into the tool."""
+    thoughts = [
+        (part.function_call.args or {}).get("thoughts")
+        for part in getattr(response.candidates[0].content, "parts", None) or []
+        if getattr(part, "function_call", None) and part.function_call.name == "think"
+    ]
+    return "\n\n".join(t for t in thoughts if t) or None, _thought_tokens(response)
 
 
 def _thought_tokens(response) -> int:
