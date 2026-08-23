@@ -157,9 +157,14 @@ class SimpleTweet:
         tweets with media await the download step."""
         if self.is_tombstone:
             archive_status, stage_status = ArchiveStatus.TOMBSTONE, StageStatus.SKIPPED
+            # Its own status rather than `stage_status`, because a tombstone is
+            # not a caption anyone declined to make: there is no media to caption
+            # and never will be unless the tweet comes back, which `restore`
+            # handles by putting this row back to pending.
+            caption_status = StageStatus.UNAVAILABLE
         else:
             archive_status = ArchiveStatus.PENDING if self.has_media else ArchiveStatus.ARCHIVED
-            stage_status = StageStatus.PENDING
+            stage_status = caption_status = StageStatus.PENDING
 
         return Item(
             item_id=self.id,
@@ -193,5 +198,6 @@ class SimpleTweet:
             view_count=self.view_count,
             archive_status=archive_status,
             upload_status=stage_status,
+            caption_status=caption_status,
             embed_status=stage_status,
         )

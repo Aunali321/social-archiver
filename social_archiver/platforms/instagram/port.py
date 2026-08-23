@@ -3,7 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
-from social_archiver.core.database import Item
+from social_archiver.core.database import Database, Item
 from social_archiver.platforms.instagram import config
 
 PLATFORM = "instagram"
@@ -21,6 +21,9 @@ class InstagramPort:
         "saved": config.TELEGRAM_CHAT_SAVED,
         "shared": config.TELEGRAM_CHAT_SHARED,
     }
+
+    async def categories(self, db: Database) -> list[str]:
+        return list(self.chats)
 
     def caption(self, item: Item) -> str:
         lines = [item.text] if item.text else []

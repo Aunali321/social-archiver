@@ -55,6 +55,11 @@ class RedditPort:
     def embed_thread_key(self, item: Item) -> str:
         return item.thread_root_id or item.item_id
 
+    async def categories(self, db: Database) -> list[str]:
+        """The subreddit dumps are archive-only and dwarf everything else, so
+        captioning them is never implied by having archived them."""
+        return list(self.chats)
+
     def embed_category(self, item: Item, loop_category: str) -> str:
         return loop_category
 

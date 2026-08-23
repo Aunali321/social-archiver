@@ -8,7 +8,7 @@ from typing import Self
 
 import aiosqlite
 
-from social_archiver.core import migrations
+from social_archiver.core import config, migrations
 from social_archiver.llm.vlm_types import VlmTrace
 
 MIGRATIONS = (
@@ -244,6 +244,21 @@ MIGRATIONS = (
           AND CASE WHEN json_valid(params) THEN json_extract(params, '$.thinking') END IS NOT 'raw'
         """,
     ),
+    # An attempt counter, so a retry is bounded and the pile of permanent
+    # failures stops being re-ground on every restart, and a reclassification of
+    # the rows `pending` was never true for.
+    # Only tombstones and skipped rows move: their media is gone or was never
+    # wanted, and upload and embed already say so on the same rows, leaving
+    # caption alone reporting them as work. An archive-*failed* row stays
+    # pending on purpose, because `failed_archive` exists to retry exactly those
+    # and captioning one becomes possible the moment it lands.
+    # Attempts start at zero for everything, the existing failed pile included,
+    # because those failures predate the fixes they were waiting on.
+    (
+        "ALTER TABLE items ADD COLUMN caption_attempts INTEGER NOT NULL DEFAULT 0",
+        "UPDATE items SET caption_status = 'unavailable' "
+        "WHERE caption_status = 'pending' AND archive_status IN ('tombstone', 'skipped')",
+    ),
 )
 
 
@@ -266,6 +281,12 @@ class StageStatus(StrEnum):
     # opposed to a technical failure. Kept apart so a scheduled retry can target
     # refusals without also re-running everything that failed transiently.
     REFUSED = "refused"
+    # Caption only, and both terminal. They are separate because their remedies
+    # are: UNAVAILABLE needs the archive stage to land the media, EXHAUSTED needs
+    # a better model or prompt. Merged, `pending` would keep reporting work that
+    # captioning can never do, which is what these two exist to stop.
+    UNAVAILABLE = "unavailable"
+    EXHAUSTED = "exhausted"
 
 
 @dataclass(slots=True)
@@ -331,6 +352,7 @@ class Item:
     caption_error: str | None = None
     embed_error: str | None = None
     archive_attempts: int = 0
+    caption_attempts: int = 0
 
     captioned_at: datetime | None = None
     local_paths: list[Path] = field(default_factory=list)
@@ -387,6 +409,7 @@ class Item:
             caption_error=row["caption_error"],
             embed_error=row["embed_error"],
             archive_attempts=row["archive_attempts"],
+            caption_attempts=row["caption_attempts"],
             captioned_at=datetime.fromisoformat(row["captioned_at"]) if row["captioned_at"] else None,
             local_paths=[Path(p) for p in json.loads(row["local_paths"] or "[]")],
             telegram_message_ids=json.loads(row["telegram_message_ids"] or "[]"),
@@ -605,6 +628,7 @@ class Database:
                     WHEN archive_status = 'tombstone' THEN 'archived'
                     ELSE archive_status END,
                 upload_status = CASE WHEN upload_status = 'skipped' THEN 'pending' ELSE upload_status END,
+                caption_status = CASE WHEN caption_status = 'unavailable' THEN 'pending' ELSE caption_status END,
                 embed_status = 'pending',
                 archive_error = NULL, archive_attempts = 0
             WHERE item_id = ? AND text IS NOT ?
@@ -697,6 +721,15 @@ class Database:
             statuses.append("refused")
         return statuses
 
+    async def categories_like(self, platform: str, pattern: str) -> list[str]:
+        """Categories matching a LIKE pattern, for the ones a platform names by
+        what it walked rather than declaring up front."""
+        cursor = await self._connection.execute(
+            "SELECT DISTINCT category FROM items WHERE platform = ? AND category LIKE ? ORDER BY category",
+            (platform, pattern),
+        )
+        return [row["category"] for row in await cursor.fetchall()]
+
     async def pending_caption_roots(
         self, platform: str, category: str, include_failed: bool = False, include_refused: bool = False
     ) -> list[str]:
@@ -716,12 +749,13 @@ class Database:
             SELECT COALESCE(thread_root_id, item_id) AS root FROM items
             WHERE platform = ? AND category = ? AND archive_status = 'archived'
             AND caption_status IN ({", ".join("?" * len(statuses))})
+            AND caption_attempts < ?
             GROUP BY root
             ORDER BY
                 MIN(CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END),
                 MAX(created_at) DESC
             """,
-            (platform, category, *statuses),
+            (platform, category, *statuses, config.CAPTION_MAX_ATTEMPTS),
         )
         return [row["root"] for row in await cursor.fetchall()]
 
@@ -746,12 +780,13 @@ class Database:
                     SELECT * FROM items
                     WHERE platform = ? AND category = ? AND archive_status = 'archived'
                     AND caption_status IN ({", ".join("?" * len(statuses))})
+                    AND caption_attempts < ?
                     AND COALESCE(thread_root_id, item_id) IN ({", ".join("?" * len(chunk))})
                     ORDER BY
                         CASE WHEN media_types LIKE '%video%' OR media_types LIKE '%animated_gif%' THEN 0 ELSE 1 END,
                         created_at DESC
                     """,
-                    (platform, category, *statuses, *chunk),
+                    (platform, category, *statuses, config.CAPTION_MAX_ATTEMPTS, *chunk),
                 )
             )
         return items
@@ -947,9 +982,20 @@ class Database:
         await self._connection.commit()
 
     async def mark_caption_failed(self, item_id: str, error: str):
+        """Each failure spends one of the item's attempts, and the last one
+        retires it. Deciding here rather than in the caller is what keeps the
+        count and the status from disagreeing: every path that fails an item
+        goes through this, and a crash between the two would strand an item
+        that is retried forever."""
         await self._connection.execute(
-            "UPDATE items SET caption_status = 'failed', caption_error = ? WHERE item_id = ?",
-            (error, item_id),
+            """
+            UPDATE items
+            SET caption_attempts = caption_attempts + 1,
+                caption_status = CASE WHEN caption_attempts + 1 >= ? THEN 'exhausted' ELSE 'failed' END,
+                caption_error = ?
+            WHERE item_id = ?
+            """,
+            (config.CAPTION_MAX_ATTEMPTS, error, item_id),
         )
         await self._connection.commit()
 

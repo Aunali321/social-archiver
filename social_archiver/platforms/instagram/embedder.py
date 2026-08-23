@@ -35,7 +35,7 @@ class CaptionJob:
 
     async def run(self, retry_failed: bool = False, retry_refused: bool = False, limit: int | None = None):
         remaining = limit
-        for category in self.port.chats:
+        for category in await self.port.categories(self.db):
             if remaining is not None and remaining <= 0:
                 break
             # A post is its own root here, so a batch of roots is a batch of

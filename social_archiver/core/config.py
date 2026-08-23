@@ -68,6 +68,9 @@ EMBED_CONCURRENCY = int(os.getenv("EMBED_CONCURRENCY", "8"))
 # Media items per call, bounding the output a single call must produce. A thread
 # with more is split across calls, each carrying the full thread text.
 EMBED_MAX_MEDIA_PER_CALL = int(os.getenv("EMBED_MAX_MEDIA_PER_CALL", "20"))
+# Videos in one call, bounded separately because the model rejects a request
+# carrying more than ten of them outright, whatever the total media count is.
+VLM_MAX_VIDEOS_PER_CALL = int(os.getenv("VLM_MAX_VIDEOS_PER_CALL", "10"))
 # A safety ceiling on context for pathological threads; real threads sit far
 # under it, so it never bites normally.
 VLM_MAX_CONTEXT_POSTS = int(os.getenv("VLM_MAX_CONTEXT_POSTS", "3000"))
@@ -75,6 +78,13 @@ VLM_MAX_CONTEXT_POSTS = int(os.getenv("VLM_MAX_CONTEXT_POSTS", "3000"))
 # thread member around them, so this is what bounds the run against a backlog of
 # millions rather than the machine's memory.
 CAPTION_BATCH_CONVERSATIONS = int(os.getenv("CAPTION_BATCH_CONVERSATIONS", "500"))
+# Calls an item gets before captioning gives up on it and marks it exhausted.
+# Measured over the 87,742 items captioned so far, counting the calls each one
+# took: 94.4% landed on the first, 5.6% on the second, and 25 items in total
+# ever landed later than that. Three leaves that tail room and still stops the
+# pile of permanent failures from being re-ground on every restart, which is
+# what used to spend a run's whole budget on items that could not succeed.
+CAPTION_MAX_ATTEMPTS = int(os.getenv("CAPTION_MAX_ATTEMPTS", "3"))
 # Vertex accepts a 500 MB request payload and base64 inflates ~33%, so cap the
 # raw file below that. Larger media is indexed on its text alone.
 VLM_MAX_MEDIA_BYTES = int(os.getenv("VLM_MAX_MEDIA_BYTES", str(360 * 1024 * 1024)))

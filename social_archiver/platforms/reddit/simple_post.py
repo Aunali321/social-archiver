@@ -67,9 +67,10 @@ class RedditItem:
         insert; items with media wait for the download step."""
         if self.is_tombstone:
             archive_status, stage_status = ArchiveStatus.TOMBSTONE, StageStatus.SKIPPED
+            caption_status = StageStatus.UNAVAILABLE
         else:
             archive_status = ArchiveStatus.PENDING if self.has_media else ArchiveStatus.ARCHIVED
-            stage_status = StageStatus.PENDING
+            stage_status = caption_status = StageStatus.PENDING
 
         return Item(
             item_id=self.fullname,
@@ -94,5 +95,6 @@ class RedditItem:
             reply_count=self.num_comments,
             archive_status=archive_status,
             upload_status=stage_status,
+            caption_status=caption_status,
             embed_status=stage_status,
         )

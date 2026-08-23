@@ -276,11 +276,21 @@ class VertexVLMClient:
         if isinstance(first, _Outcome):
             return first  # the think turn never completed; nothing to answer from
 
-        reasoning, leaked = _read_think(first)
-        if leaked:
+        model_turn = _think_turn(first)
+        if model_turn is None:
+            # Nothing to answer from, and appending a partless turn is rejected
+            # outright. Read it the way a one-turn call is read, so a block or an
+            # empty candidate comes back as the failure it is instead of an
+            # IndexError, or a 400 one turn later.
+            return _read_response(first)
+
+        reasoning = _read_think(model_turn)
+        # `thoughtsTokenCount` is the check that native thinking really stayed
+        # off: non-zero means the model kept reasoning privately and wrote only
+        # a plan into the tool.
+        if leaked := _thought_tokens(first):
             logger.warning(f"Native thinking leaked {leaked} tokens; the captured trace is a plan, not the reasoning")
 
-        model_turn = first.candidates[0].content
         contents.append(model_turn)
         # One response per call. The model sometimes reasons across several think
         # calls, and Vertex rejects the next turn unless the counts match exactly.
@@ -364,17 +374,27 @@ class _Outcome:
         self.error = error
 
 
-def _read_think(response) -> tuple[str | None, int]:
+def _think_turn(response):
+    """The forced-think turn's content, or None when there is nothing usable in
+    it. A blocked or empty response has no candidate to read, and a candidate
+    whose content carries no parts cannot be sent back as conversation history:
+    the next request is rejected for having a turn with no parts at all."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+    content = candidates[0].content
+    return content if content is not None and (content.parts or []) else None
+
+
+def _read_think(content) -> str | None:
     """The forced calls' arguments are the trace — several, when the model
-    reasons across more than one call. `thoughtsTokenCount` is the check that
-    native thinking really stayed off: non-zero means the model kept reasoning
-    privately and wrote only a plan into the tool."""
+    reasons across more than one call."""
     thoughts = [
         (part.function_call.args or {}).get("thoughts")
-        for part in getattr(response.candidates[0].content, "parts", None) or []
+        for part in content.parts or []
         if getattr(part, "function_call", None) and part.function_call.name == "think"
     ]
-    return "\n\n".join(t for t in thoughts if t) or None, _thought_tokens(response)
+    return "\n\n".join(t for t in thoughts if t) or None
 
 
 def _thought_tokens(response) -> int:

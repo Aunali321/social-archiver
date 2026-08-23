@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 
 class IndexPort(Protocol):
     platform: str
-    chats: dict[str, int]
+
+    async def categories(self, db: Database) -> list[str]:
+        """The categories to index, the same set the caption stage works on so
+        a caption is never written into a category nothing reads back."""
 
     def embed_category(self, item: Item, loop_category: str) -> str:
         """Which Milvus collection (category) to index this item under."""
@@ -36,7 +39,7 @@ class IndexJob:
         self.port = port
 
     async def run(self, retry_failed: bool = False):
-        for category in self.port.chats:
+        for category in await self.port.categories(self.db):
             pending = await self.db.pending_embed(self.port.platform, category, retry_failed)
             if not pending:
                 continue

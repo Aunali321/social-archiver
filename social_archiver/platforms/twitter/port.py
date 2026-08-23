@@ -60,6 +60,12 @@ class TwitterPort:
     def embed_thread_key(self, item: Item) -> str:
         return item.thread_root_id or item.item_id
 
+    async def categories(self, db: Database) -> list[str]:
+        """Profile walks archive media like any other category but have no
+        Telegram destination, so they are absent from `chats` and would
+        otherwise never be captioned or indexed."""
+        return [*self.chats, *await db.categories_like(PLATFORM, "profile-%")]
+
     def embed_category(self, item: Item, loop_category: str) -> str:
         return loop_category
 

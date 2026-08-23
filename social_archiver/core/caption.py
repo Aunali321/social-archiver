@@ -58,7 +58,12 @@ class CaptionPort(Protocol):
     """What the engine needs from a platform to caption its threads."""
 
     platform: str
-    chats: dict[str, int]
+
+    async def categories(self, db: Database) -> list[str]:
+        """The categories to caption. Deliberately not the upload `chats`,
+        whose keys answer a different question: a category with no Telegram
+        destination is still archived and still worth captioning, and a
+        category that is archive-only is still excluded."""
 
     def embed_label(self, item: Item, context: dict[str, Item]) -> str:
         """The `[tweet_id:...]`-prefixed line for this item. `context` maps id to
@@ -104,7 +109,7 @@ class CaptionJob:
 
     async def run(self, retry_failed: bool = False, retry_refused: bool = False, limit: int | None = None):
         remaining = limit
-        for category in self.port.chats:
+        for category in await self.port.categories(self.db):
             if remaining is not None and remaining <= 0:
                 break
             roots = await self.db.pending_caption_roots(self.port.platform, category, retry_failed, retry_refused)
@@ -185,19 +190,28 @@ class CaptionJob:
 
     def _plan_calls(self, conversation: _Conversation, context_map: dict[str, Item]) -> list[_Call]:
         """Split media-bearing targets into calls of at most
-        EMBED_MAX_MEDIA_PER_CALL media, never splitting one item across calls.
-        Every call renders the whole conversation as context."""
+        EMBED_MAX_MEDIA_PER_CALL media and VLM_MAX_VIDEOS_PER_CALL videos, never
+        splitting one item across calls. Every call renders the whole
+        conversation as context.
+
+        The two bounds are separate because they come from different places: the
+        media bound is ours, to keep one call's output manageable, while the
+        video bound is the model's, which rejects an eleventh video outright."""
         chunks: list[list[Item]] = []
         current: list[Item] = []
-        media_in_current = 0
+        media_in_current = videos_in_current = 0
         for member in conversation.members:
             if member.item_id not in conversation.target_ids or not member.media_count:
                 continue
-            if current and media_in_current + member.media_count > config.EMBED_MAX_MEDIA_PER_CALL:
+            videos = _video_count(member)
+            over_media = media_in_current + member.media_count > config.EMBED_MAX_MEDIA_PER_CALL
+            over_videos = videos_in_current + videos > config.VLM_MAX_VIDEOS_PER_CALL
+            if current and (over_media or over_videos):
                 chunks.append(current)
-                current, media_in_current = [], 0
+                current, media_in_current, videos_in_current = [], 0, 0
             current.append(member)
             media_in_current += member.media_count
+            videos_in_current += videos
         if current:
             chunks.append(current)
 
@@ -294,6 +308,20 @@ class CaptionJob:
                 error=result.error,
             )
         )
+
+
+_VIDEO_KINDS = frozenset({"video", "animated_gif"})
+
+
+def _video_count(item: Item) -> int:
+    """How many of an item's files to count against the video bound.
+
+    `media_types` is the set of kinds an item holds, not one entry per file, so
+    a mixed item cannot say how many of its files are video. Counting all of
+    them splits such an item early rather than sending an eleventh video and
+    losing the whole call, and it is exact for the items that are all one kind,
+    which is nearly all of them."""
+    return item.media_count if _VIDEO_KINDS & set(item.media_types) else 0
 
 
 def _cap_context(members: list[Item], target_ids: set[str]) -> list[Item]:

@@ -34,6 +34,10 @@ class WhatsAppPort:
     def embed_thread_key(self, item: Item) -> str:
         return item.thread_root_id or item.item_id
 
+    async def categories(self, db: Database) -> list[str]:
+        """Groups are archive-only, so `chats` is the whole caption scope."""
+        return list(self.chats)
+
     def embed_category(self, item: Item, loop_category: str) -> str:
         return item.category
 
