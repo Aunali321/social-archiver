@@ -18,6 +18,8 @@ from social_archiver.core import config
 from social_archiver.core.config import PLATFORMS
 from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import ensure_media
+from social_archiver.core.media_kind import guess_mime_type
+from social_archiver.core.media_links import links
 from social_archiver.read import conversation, semantic
 from social_archiver.read.models import (
     ItemFilters,
@@ -420,17 +422,30 @@ async def archive_stats() -> list[ArchiveStatsOut]:
     return [ArchiveStatsOut(**asdict(await reader.stats(p))) for p in await reader.present()]
 
 
-@router.get("/api/media/{platform}/{item_id}/{index}")
-async def media(platform: str, item_id: str, index: int) -> FileResponse:
+async def _media_file(platform: str, item_id: str, index: int) -> FileResponse:
     item = await reader.get(platform, item_id)
     if item is None:
         raise HTTPException(404, f"no {platform} item {item_id}")
-    if index >= len(item.local_paths):
+    if index >= len(item.local_paths) or not item.local_paths[index].exists():
         raise HTTPException(404, "not on disk; media may have been cleaned up after upload")
     path = item.local_paths[index]
-    if not path.exists():
-        raise HTTPException(404, "not on disk; media may have been cleaned up after upload")
-    return FileResponse(path)
+    return FileResponse(path, media_type=guess_mime_type(path))
+
+
+@router.get("/api/media/{platform}/{item_id}/{index}")
+async def media(platform: str, item_id: str, index: int) -> FileResponse:
+    return await _media_file(platform, item_id, index)
+
+
+# Outside the session guard: the signature is the credential (see core.media_links)
+public_router = APIRouter()
+
+
+@public_router.get("/media/{platform}/{item_id}/{index}")
+async def signed_media(platform: str, item_id: str, index: int, expires: int, signature: str) -> FileResponse:
+    if not links.valid(platform, item_id, index, expires, signature):
+        raise HTTPException(403, "this media link is invalid or has expired; open the item again for a fresh one")
+    return await _media_file(platform, item_id, index)
 
 
 @router.post("/api/items/{platform}/{item_id}/recover-media", response_model=ItemOut)

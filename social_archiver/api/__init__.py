@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
     signed_in = [Depends(auth.require_session)]
     app.include_router(control.router, dependencies=signed_in)
     app.include_router(content.router, dependencies=signed_in)
+    app.include_router(content.public_router)
     app.router.routes.extend(mcp_app.routes)
     app.include_router(frontend.router)
     return app

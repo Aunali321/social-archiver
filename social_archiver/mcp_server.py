@@ -5,8 +5,7 @@ Served over streamable HTTP at /mcp by the web process (see social_archiver.api)
 same owner sign-in as the UI, so any MCP host that speaks OAuth can connect by URL alone.
 """
 
-from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server import MCPServer
 from mcp.server.auth.provider import OAuthAuthorizationServerProvider
@@ -14,8 +13,8 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.types import ToolAnnotations
 
 from social_archiver.core import config
-from social_archiver.core.config import PLATFORMS
 from social_archiver.core.database import Item
+from social_archiver.core.media_links import links
 from social_archiver.read import ArchiveReader, ItemFilters
 from social_archiver.read import conversation as conversations
 from social_archiver.read import semantic as semantic_search
@@ -55,52 +54,55 @@ def _item(item: Item) -> dict[str, Any]:
     # than something the user liked/saved themselves
     out["is_seed"] = is_seed(item)
     if item.has_media:
-        out["media"] = item.media_types or item.media_count
+        # A signed link per file on disk, fetchable without a session for links.TTL; a file
+        # can be missing (never downloaded, or cleaned up after upload)
+        out["media"] = [
+            {"index": index, "type": kind}
+            | (
+                {"url": links.url(item.platform, item.item_id, index)}
+                if index < len(item.local_paths) and item.local_paths[index].exists()
+                else {"missing": True}
+            )
+            for index, kind in enumerate(_media_kinds(item))
+        ]
     return out
 
 
-def _platforms(platform: str | None) -> tuple[str, ...]:
-    if platform and platform not in PLATFORMS:
-        raise ValueError(f"unknown platform {platform!r}; expected one of {', '.join(PLATFORMS)}")
-    return (platform,) if platform else ()
+def _media_kinds(item: Item) -> list[str | None]:
+    count = max(item.media_count, len(item.local_paths))
+    return [item.media_types[i] if i < len(item.media_types) else None for i in range(count)]
 
 
 async def search_archive(
-    query: str,
-    platform: str | None = None,
+    query: str = "",
     semantic: bool = False,
     sort: SearchSort = SearchSort.RELEVANCE,
-    author: str | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    has_media: bool | None = None,
-    seeds_only: bool = False,
     limit: int = 20,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Search the social media archive (twitter, reddit, instagram, whatsapp).
+    """Search or browse the archive (twitter, reddit, instagram, whatsapp).
 
-    Full-text by default: every word must match, "quoted phrases" match in order, word*
-    matches a prefix, -word excludes, `a OR b` takes either and NEAR(a b, 5) keeps words
-    within five of each other. The query also takes operators, alone or with words:
-    from:author  in:"whatsapp chat name"  r:subreddit  platform:reddit  category:x
-    origin:x  shared:user  after:YYYY-MM-DD  before:YYYY-MM-DD  likes:>N  views:>N
-    has:media|link|image|video|gif|audio|sticker|document  -has:media|link
-    is:post|reply|comment|retweet|quote (negatable)  is:reel|carousel|group|dm|liked
-    match:text|media|names (restrict words to post text, media descriptions, or names).
-    semantic=True uses vector search when embeddings are configured and always ranks by
-    relevance. Dates are ISO (YYYY-MM-DD)."""
-    filters = ItemFilters(
-        platforms=_platforms(platform),
-        author=author,
-        has_media=has_media,
-        seeds_only=seeds_only,
-        date_from=datetime.fromisoformat(date_from) if date_from else None,
-        date_to=datetime.fromisoformat(date_to) if date_to else None,
-    )
+    Words: every word must match, "quoted phrases" match in order, word* matches a prefix,
+    -word excludes, `a OR b` takes either, NEAR(a b, 5) keeps words within five of each
+    other. Words match post text and the captions of images and videos alike; each hit says
+    where it matched (matched_text / matched_media).
+    Operators, alone or with words:
+    platform:twitter|reddit|instagram|whatsapp  from:author  in:"whatsapp chat name"
+    r:subreddit  category:x  origin:x  shared:user  after:YYYY-MM-DD  before:YYYY-MM-DD
+    likes:>N  views:>N  has:media|link|image|video|gif|audio|sticker|document
+    -has:media|link  is:post|reply|comment|retweet|quote (negatable with -)
+    is:reel|carousel|group|dm|liked  match:text|media|names.
+    An empty or operators-only query browses what matches, newest first. Page with offset.
+    semantic=True ranks by meaning when embeddings are configured (no offset).
+    Each item lists its media files with a signed url (valid 24 hours, no sign-in needed)
+    to fetch the original image, video, audio or document. Open a hit with open_item for
+    its neighbours, replies or whole discussion."""
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
     if semantic:
-        found = await semantic_search.find(reader, query, filters, limit=limit)
+        found = await semantic_search.find(reader, query, ItemFilters(), limit=limit)
         return [{**_item(item), "matched": hit.caption} for hit, item in found]
-    hits = await reader.search(query, filters, sort, limit=limit)
+    hits = await reader.search(query, ItemFilters(), sort, limit=limit, offset=offset)
     return [
         {
             **_item(h.item),
@@ -111,97 +113,56 @@ async def search_archive(
     ]
 
 
-async def list_items(
-    platform: str | None = None,
-    category: str | None = None,
-    author: str | None = None,
-    chat: str | None = None,
-    subreddit: str | None = None,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    seeds_only: bool = False,
-    cursor: str | None = None,
-    limit: int = 25,
-) -> dict[str, Any]:
-    """Browse archived items newest-first. Dates are ISO (YYYY-MM-DD). `chat` is a WhatsApp
-    chat id from list_chats. seeds_only=True hides expander-adopted context, leaving only what
-    the user liked/saved. Pass the returned next_cursor to continue."""
-    filters = ItemFilters(
-        platforms=_platforms(platform),
-        category=category,
-        author=author,
-        chat=chat,
-        subreddit=subreddit,
-        seeds_only=seeds_only,
-        date_from=datetime.fromisoformat(date_from) if date_from else None,
-        date_to=datetime.fromisoformat(date_to) if date_to else None,
-    )
-    page = await reader.list_items(filters, cursor=cursor, limit=limit)
-    return {"items": [_item(i) for i in page.items], "next_cursor": page.next_cursor}
+async def open_item(platform: str, item_id: str, view: Literal["item", "discussion"] = "item") -> dict[str, Any]:
+    """Open one item from search_archive.
 
-
-async def get_item(platform: str, item_id: str) -> dict[str, Any]:
-    """One item with its graph neighbours: parent, quoted/retweeted post, what led to it
-    being archived, and direct replies."""
+    view="item": the item with its neighbours (the post it replies to, quotes or retweets,
+    what led to it being archived) and its direct replies.
+    view="discussion": the whole conversation around it. For twitter and reddit that is the
+    ancestors (root first) and the nested reply tree; for whatsapp, that chat's messages on
+    the same day. Entries carry is_seed: false means the archiver pulled it in as context,
+    not that the user liked or saved it."""
     item = await reader.get(platform, item_id)
     if item is None:
         raise ValueError(f"no {platform} item {item_id}")
+    if view == "discussion":
+        return await _discussion(platform, item)
+    opened = _item(item)
     related = await reader.related(platform, item)
-    replies = await reader.replies(platform, item_id, limit=25)
-    out = _item(item)
-    out.update({name: _item(neighbour) for name, neighbour in related.items() if neighbour})
-    if replies:
-        out["reply_items"] = [_item(r) for r in replies]
-    return out
+    opened.update({name: _item(neighbour) for name, neighbour in related.items() if neighbour})
+    if replies := await reader.replies(platform, item_id, limit=25):
+        opened["reply_items"] = [_item(r) for r in replies]
+    return opened
 
 
-async def get_conversation(platform: str, item_id: str) -> dict[str, Any]:
-    """A twitter/reddit discussion assembled around one item: `ancestors` (root first) above
-    it, `replies` as a nested tree below it. Each entry carries is_seed — False means the
-    archiver pulled it in as context, not that the user liked/saved it."""
-    if platform not in conversations.CONVERSATION_PLATFORMS:
-        raise ValueError(f"{platform} has no conversation trees; use get_thread or list_items(chat=...)")
-    tree = await conversations.load(reader, platform, item_id)
-    if tree is None:
-        raise ValueError(f"no {platform} item {item_id}")
+async def _discussion(platform: str, item: Item) -> dict[str, Any]:
+    if platform in conversations.CONVERSATION_PLATFORMS:
+        tree = await conversations.load(reader, platform, item.item_id)
 
-    def node(entry: conversations.ConversationNode) -> dict[str, Any]:
-        return {**_item(entry.item), "replies": [node(r) for r in entry.replies]}
+        def node(entry: conversations.ConversationNode) -> dict[str, Any]:
+            return {**_item(entry.item), "replies": [node(r) for r in entry.replies]}
 
-    return {
-        "focus": _item(tree.focus),
-        "ancestors": [_item(a) for a in tree.ancestors],
-        "missing_parent": tree.missing_parent,
-        "replies": [node(r) for r in tree.replies],
-    }
-
-
-async def get_thread(platform: str, root_id: str) -> list[dict[str, Any]]:
-    """A whole thread or conversation in chronological order. For WhatsApp, root_id is
-    '<chat_jid>:<YYYY-MM-DD>' — one chat-day."""
-    return [_item(i) for i in await reader.thread(platform, root_id)]
-
-
-async def list_chats(platform: str = "whatsapp") -> list[dict[str, Any]]:
-    """Conversations with name, message count and latest message, newest first."""
-    return [
-        {
-            "chat_id": chat.chat_id,
-            "name": chat.name or None,
-            "messages": chat.message_count,
-            "last_at": chat.last_at.isoformat() if chat.last_at else None,
-            "last_text": chat.last_text,
+        return {
+            "focus": _item(tree.focus),
+            "ancestors": [_item(a) for a in tree.ancestors],
+            "missing_parent": tree.missing_parent,
+            "replies": [node(r) for r in tree.replies],
         }
-        for chat in await reader.chats(platform)
-    ]
+    if item.thread_root_id:
+        return {
+            "focus_id": item.item_id,
+            "messages": [_item(m) for m in await reader.thread(platform, item.thread_root_id)],
+        }
+    raise ValueError(f"{platform} items have no discussion; use view='item'")
 
 
-async def archive_stats() -> list[dict[str, Any]]:
-    """What the archive holds: totals, categories and date range per platform."""
-    out = []
+async def archive_overview() -> dict[str, Any]:
+    """What the archive holds: per platform the totals, categories and date range, and the
+    WhatsApp chats by name (for in:"chat name" searches), most recently active first."""
+    platforms = []
     for platform in await reader.present():
         stats = await reader.stats(platform)
-        out.append(
+        platforms.append(
             {
                 "platform": platform,
                 "total": stats.total,
@@ -211,7 +172,16 @@ async def archive_stats() -> list[dict[str, Any]]:
                 "newest": stats.newest.isoformat() if stats.newest else None,
             }
         )
-    return out
+    chats = [
+        {
+            "name": chat.name or chat.chat_id,
+            "kind": chat.category,
+            "messages": chat.message_count,
+            "last_at": chat.last_at.date().isoformat() if chat.last_at else None,
+        }
+        for chat in await reader.chats("whatsapp")
+    ]
+    return {"platforms": platforms, "whatsapp_chats": chats}
 
 
 def create(provider: OAuthAuthorizationServerProvider, auth: AuthSettings) -> MCPServer:
@@ -223,6 +193,7 @@ def create(provider: OAuthAuthorizationServerProvider, auth: AuthSettings) -> MC
         auth_server_provider=provider,
         auth=auth,
     )
-    for tool in (search_archive, list_items, get_item, get_conversation, get_thread, list_chats, archive_stats):
-        server.add_tool(tool, annotations=_READ_ONLY)
+    server.add_tool(search_archive, annotations=_READ_ONLY)
+    server.add_tool(archive_overview, annotations=_READ_ONLY)
+    server.add_tool(open_item, annotations=_READ_ONLY)
     return server
