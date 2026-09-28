@@ -1,5 +1,6 @@
 <script lang="ts">
-	/** Body text, optionally rendered from a search snippet whose [ ] markers become <mark>s. */
+	/** Body text, optionally rendered from a search snippet whose \u0002 … \u0003 marks
+	 * become <mark>s. */
 	interface Props {
 		text: string | null;
 		snippet?: string | null;
@@ -12,10 +13,10 @@
 	const parts = $derived.by(() => {
 		if (snippet) {
 			return snippet
-				.split(/(\[[^\[\]]{1,80}\])/g)
+				.split(/(\u0002[^\u0002\u0003]*\u0003)/g)
 				.filter(Boolean)
 				.map((part) =>
-					part.startsWith('[') && part.endsWith(']')
+					part.startsWith('\u0002')
 						? { text: part.slice(1, -1), mark: true }
 						: { text: part, mark: false }
 				);

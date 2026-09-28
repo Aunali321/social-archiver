@@ -211,7 +211,7 @@
 			{:else if hits.length}
 				<div class="flex flex-col gap-3">
 					{#each hits as hit (hit.item.platform + hit.item.item_id)}
-						<ItemCard item={hit.item} snippet={hit.snippet} />
+						<ItemCard item={hit.item} snippet={hit.snippet} mediaSnippet={hit.media_snippet} />
 					{/each}
 				</div>
 				{#if more}

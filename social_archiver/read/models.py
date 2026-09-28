@@ -120,8 +120,21 @@ class Page:
 
 @dataclass(slots=True)
 class SearchHit:
+    """Snippets are set only where the query matched that text, so a hit found in its media
+    caption says so instead of passing caption prose off as the post. Matched words sit
+    between MARK_START and MARK_END: brackets would collide with the text's own."""
+
     item: Item
-    snippet: str | None
+    snippet: str | None  # from the post text
+    media_snippet: str | None = None  # from the media caption
+
+
+MARK_START, MARK_END = "\x02", "\x03"
+
+
+def bracketed(snippet: str) -> str:
+    """A snippet for plain-text readers (the CLI, MCP clients), matches as [word]."""
+    return snippet.replace(MARK_START, "[").replace(MARK_END, "]")
 
 
 @dataclass(slots=True)

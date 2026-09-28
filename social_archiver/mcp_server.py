@@ -19,7 +19,7 @@ from social_archiver.core.database import Item
 from social_archiver.read import ArchiveReader, ItemFilters
 from social_archiver.read import conversation as conversations
 from social_archiver.read import semantic as semantic_search
-from social_archiver.read.models import SearchSort, is_seed
+from social_archiver.read.models import SearchSort, bracketed, is_seed
 
 reader = ArchiveReader(config.DATA_DIR)
 
@@ -98,13 +98,17 @@ async def search_archive(
         date_to=datetime.fromisoformat(date_to) if date_to else None,
     )
     if semantic:
-        hits = await semantic_search.search(query, filters.platforms, limit=limit)
-        return [
-            {**_item(item), "matched": hit.caption}
-            for hit, item in await semantic_search.hydrate(reader, hits, filters)
-        ]
+        found = await semantic_search.find(reader, query, filters, limit=limit)
+        return [{**_item(item), "matched": hit.caption} for hit, item in found]
     hits = await reader.search(query, filters, sort, limit=limit)
-    return [{**_item(h.item), "matched": h.snippet} for h in hits]
+    return [
+        {
+            **_item(h.item),
+            **({"matched_text": bracketed(h.snippet)} if h.snippet else {}),
+            **({"matched_media": bracketed(h.media_snippet)} if h.media_snippet else {}),
+        }
+        for h in hits
+    ]
 
 
 async def list_items(

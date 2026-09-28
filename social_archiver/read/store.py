@@ -20,6 +20,8 @@ import aiosqlite
 from social_archiver.core.config import PLATFORMS
 from social_archiver.core.database import _ITEM_COLUMNS, Item
 from social_archiver.read.models import (
+    MARK_END,
+    MARK_START,
     MEDIA_TYPES,
     PRODUCT_TYPES,
     SEED_ORIGINS,
@@ -61,6 +63,14 @@ _SEARCH_ORDER = {
     SearchSort.NEWEST: "items.created_at DESC, items.item_id DESC",
     SearchSort.OLDEST: "items.created_at IS NULL, items.created_at ASC, items.item_id ASC",
 }
+
+
+_MARKS = (MARK_START, MARK_END)
+
+
+def _matched(snippet: str | None) -> str | None:
+    """snippet() returns a column's opening words even where nothing matched."""
+    return snippet if snippet and MARK_START in snippet else None
 
 
 @dataclass(slots=True)
@@ -320,13 +330,21 @@ class ArchiveReader:
         rows = await archive.connection.execute_fetchall(
             f"""
             SELECT {qualified}, items.created_at AS _key, {_RELEVANCE} AS _score,
-                   snippet(items_fts, -1, '[', ']', '…', 18) AS _snippet
+                   snippet(items_fts, 0, ?, ?, '…', 24) AS _text_snippet,
+                   snippet(items_fts, 1, ?, ?, '…', 24) AS _media_snippet
             FROM items_fts JOIN items ON items.rowid = items_fts.rowid
             WHERE items_fts MATCH ? {where} ORDER BY {_SEARCH_ORDER[sort]} LIMIT ?
             """,
-            (expression, *params, limit),
+            (*_MARKS, *_MARKS, expression, *params, limit),
         )
-        return [_Ranked(row["_key"], row["_score"], SearchHit(Item.from_row(row), row["_snippet"])) for row in rows]
+        return [
+            _Ranked(
+                row["_key"],
+                row["_score"],
+                SearchHit(Item.from_row(row), _matched(row["_text_snippet"]), _matched(row["_media_snippet"])),
+            )
+            for row in rows
+        ]
 
     async def _search_plain(
         self, archive: _Archive, text: str | None, filters: ItemFilters, sort: SearchSort, limit: int

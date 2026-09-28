@@ -76,7 +76,8 @@ export interface Page {
 
 export interface SearchHit {
 	item: Item;
-	snippet: string | null;
+	snippet: string | null; // matched post text; matches between \u0002 and \u0003
+	media_snippet: string | null; // matched media caption, same marks
 	score: number | null;
 }
 

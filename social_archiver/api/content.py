@@ -28,7 +28,6 @@ from social_archiver.read.models import (
     SearchSort,
     is_seed,
 )
-from social_archiver.read.query import parse
 from social_archiver.read.store import ArchiveReader
 
 router = APIRouter()
@@ -105,7 +104,8 @@ class PageOut(BaseModel):
 
 class SearchHitOut(BaseModel):
     item: ItemOut
-    snippet: str | None
+    snippet: str | None  # matched post text; words between \u0002 and \u0003
+    media_snippet: str | None = None  # matched media caption, same marks
     score: float | None = None
 
 
@@ -302,16 +302,7 @@ async def search(params: Annotated[SearchParams, Query()]) -> SearchOut:
     semantic_platforms = semantic.available()
     try:
         if params.mode == "semantic":
-            if not semantic_platforms:
-                raise HTTPException(
-                    400, "semantic search is not configured; EMBEDDING_ENABLED is off or nothing is embedded"
-                )
-            parsed = parse(params.q, params.filters())
-            if not parsed.text:
-                raise HTTPException(400, "semantic search needs words to search for, not only operators")
-            found = await semantic.hydrate(
-                reader, await semantic.search(parsed.text, parsed.filters.platforms, limit=params.limit), parsed.filters
-            )
+            found = await semantic.find(reader, params.q, params.filters(), limit=params.limit)
             entries = await with_context([item for _, item in found])
             return SearchOut(
                 mode="semantic",
@@ -329,7 +320,10 @@ async def search(params: Annotated[SearchParams, Query()]) -> SearchOut:
     entries = await with_context([hit.item for hit in hits])
     return SearchOut(
         mode="text",
-        hits=[SearchHitOut(item=entry, snippet=hit.snippet) for hit, entry in zip(hits, entries, strict=True)],
+        hits=[
+            SearchHitOut(item=entry, snippet=hit.snippet, media_snippet=hit.media_snippet)
+            for hit, entry in zip(hits, entries, strict=True)
+        ],
         semantic_platforms=semantic_platforms,
     )
 

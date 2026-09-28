@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Repeat2 from '@lucide/svelte/icons/repeat-2';
+	import ImageIcon from '@lucide/svelte/icons/image';
 	import Avatar from './Avatar.svelte';
 	import EngagementRow from './EngagementRow.svelte';
 	import PlatformBadge from './PlatformBadge.svelte';
@@ -16,9 +17,10 @@
 	interface Props {
 		item: Item;
 		snippet?: string | null;
+		mediaSnippet?: string | null; // a search match in the media caption
 	}
 
-	let { item, snippet = null }: Props = $props();
+	let { item, snippet = null, mediaSnippet = null }: Props = $props();
 
 	const href = $derived(`/item/${item.platform}/${encodeURIComponent(item.item_id)}`);
 	const where = $derived(
@@ -64,6 +66,14 @@
 		{#if item.media.length}
 			<div class="mt-2"><MediaStrip {item} /></div>
 		{/if}
+	{/if}
+
+	{#if mediaSnippet}
+		<div class="mt-2 flex gap-2 rounded-sm bg-surface-container px-3 py-2">
+			<ImageIcon size={16} class="mt-0.5 shrink-0 text-on-surface-variant" />
+			<span class="sr-only">Matched in the media description:</span>
+			<ItemText text={null} snippet={mediaSnippet} clamp={3} />
+		</div>
 	{/if}
 
 	<EngagementRow {item} class="mt-2" />

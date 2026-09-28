@@ -73,20 +73,21 @@ async def _run_search(args):
     from social_archiver.core import config
     from social_archiver.read import ArchiveReader, ItemFilters
     from social_archiver.read import semantic as semantic_search
+    from social_archiver.read.models import bracketed
 
     reader = ArchiveReader(config.DATA_DIR)
     platforms = tuple(dict.fromkeys(args.platform)) if args.platform else ()
+    filters = ItemFilters(platforms=platforms, category=args.category, author=args.author)
     try:
         if args.semantic:
-            if not semantic_search.available():
-                sys.exit("semantic search is not configured; enable EMBEDDING_ENABLED and run embed jobs")
-            for hit in await semantic_search.search(args.query, platforms, limit=args.limit):
-                item = await reader.get(hit.platform, hit.item_id)
-                _print_hit(item, hit.caption, hit.score) if item else None
+            for hit, item in await semantic_search.find(reader, args.query, filters, limit=args.limit):
+                _print_hit(item, hit.caption, hit.score)
         else:
-            filters = ItemFilters(platforms=platforms, category=args.category, author=args.author)
             for hit in await reader.search(args.query, filters, limit=args.limit):
-                _print_hit(hit.item, hit.snippet, None)
+                matched = hit.snippet or hit.media_snippet
+                _print_hit(hit.item, bracketed(matched) if matched else None, None)
+    except ValueError as e:
+        sys.exit(str(e))
     finally:
         await reader.close()
 

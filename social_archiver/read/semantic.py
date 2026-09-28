@@ -1,8 +1,8 @@
 """Semantic search over the per-platform Milvus stores, hydrated from the archives.
 
 Optional twice over: embedding must be enabled and a platform must actually have been
-embedded. `available()` is the gate the API and UI show, so a viewer without embeddings
-degrades to text search instead of erroring."""
+embedded. `available()` is what the UI checks before offering it; asking anyway raises,
+because an empty answer would read as "nothing matches"."""
 
 import asyncio
 import importlib
@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from social_archiver.core import config
-from social_archiver.core.config import PLATFORMS
+from social_archiver.core.config import PLATFORMS, ConfigError
 from social_archiver.core.database import Item
 from social_archiver.core.milvus_manager import MilvusManager
 from social_archiver.llm import embed_client
 from social_archiver.read.models import ItemFilters
+from social_archiver.read.query import parse
 from social_archiver.read.store import ArchiveReader
 
 
@@ -72,7 +73,11 @@ async def search(query: str, platforms: tuple[str, ...], limit: int = 20) -> lis
     Instagram album embeds per file, and the UI links to items, not vectors)."""
     ready = [p for p in available() if not platforms or p in platforms]
     if not ready:
-        return []
+        raise ConfigError(
+            "semantic search is unavailable: EMBEDDING_ENABLED is off or nothing has been embedded"
+            + (f" for {', '.join(platforms)}" if platforms else "")
+            + "; use full-text search"
+        )
     vector = await asyncio.to_thread(embed_client.embed_query, query)
     batches = await asyncio.gather(*(asyncio.to_thread(_search_one, p, vector, query, limit) for p in ready))
     merged = sorted((hit for batch in batches for hit in batch), key=lambda hit: hit.score, reverse=True)
@@ -97,3 +102,14 @@ async def hydrate(
         if not filters.platforms or platform in filters.platforms
     }
     return [(hit, item) for hit in hits if (item := held.get(hit.platform, {}).get(hit.item_id))]
+
+
+async def find(
+    reader: ArchiveReader, query: str, filters: ItemFilters, limit: int = 20
+) -> list[tuple[SemanticHit, Item]]:
+    """The whole semantic query: operators become filters (see read.query), only the free
+    words are embedded, and hits that fail the filters drop out."""
+    parsed = parse(query, filters)
+    if not parsed.text:
+        raise ValueError("semantic search needs words to search for, not only operators")
+    return await hydrate(reader, await search(parsed.text, parsed.filters.platforms, limit=limit), parsed.filters)
