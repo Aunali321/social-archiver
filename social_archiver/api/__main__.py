@@ -9,7 +9,8 @@ from social_archiver.core.utils import setup_logging
 def main():
     setup_logging(config.LOGS_DIR / "web.log")
     uvicorn.run(
-        "social_archiver.api:app",
+        "social_archiver.api:create_app",
+        factory=True,
         host=os.getenv("WEB_HOST", "0.0.0.0"),
         port=int(os.getenv("WEB_PORT", "8080")),
         log_config=None,

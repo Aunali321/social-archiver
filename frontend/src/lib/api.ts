@@ -191,6 +191,11 @@ export class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(path, init);
 	const body = await response.json().catch(() => null);
+	// A lapsed session sends the page to sign in and back; auth calls report their own 401s
+	if (response.status === 401 && !path.startsWith('/api/auth/')) {
+		const here = location.pathname + location.search;
+		location.assign(`/login${query({ next: here })}`);
+	}
 	if (!response.ok) {
 		throw new ApiError(response.status, body?.detail ?? response.statusText);
 	}
@@ -210,6 +215,12 @@ function query(params: Record<string, string | number | boolean | null | undefin
 	return text ? `?${text}` : '';
 }
 
+export type SearchSort = 'relevance' | 'newest' | 'oldest';
+export type MatchField = 'text' | 'media' | 'names';
+export type MediaFilter = 'image' | 'video' | 'gif' | 'audio' | 'sticker' | 'document';
+export type ItemKind = 'post' | 'reply' | 'repost' | 'quote';
+export type PostFormat = 'reel' | 'post' | 'carousel';
+
 export interface ItemFilters {
 	platforms?: string;
 	seeds_only?: boolean;
@@ -221,11 +232,37 @@ export interface ItemFilters {
 	origin?: string;
 	archive_status?: string;
 	has_media?: boolean;
+	media?: MediaFilter;
+	kind?: ItemKind;
+	has_link?: boolean;
+	post_format?: PostFormat;
 	date_from?: string;
 	date_to?: string;
 }
 
+function post<T>(path: string, body: unknown = {}): Promise<T> {
+	return request<T>(path, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+}
+
+export interface Authorization {
+	client_name: string;
+	redirect_uri: string;
+}
+
 export const api = {
+	/* Sign-in */
+	session: () => request<{ authenticated: boolean }>('/api/auth/session'),
+	login: (password: string) => post<{ authenticated: boolean }>('/api/auth/login', { password }),
+	logout: () => post<{ authenticated: boolean }>('/api/auth/logout'),
+	authorization: (id: string) =>
+		request<Authorization>(`/api/auth/authorize/${encodeURIComponent(id)}`),
+	decide: (id: string, approve: boolean) =>
+		post<{ redirect: string }>(`/api/auth/authorize/${encodeURIComponent(id)}`, { approve }),
+
 	platforms: () => request<{ platforms: string[]; semantic: string[] }>('/api/platforms'),
 	items: (filters: ItemFilters, cursor?: string | null, limit = 40) =>
 		request<Page>(`/api/items${query({ ...filters, cursor, limit })}`),
@@ -235,13 +272,25 @@ export const api = {
 		request<Conversation>(`/api/conversation/${platform}/${encodeURIComponent(id)}`),
 	thread: (platform: string, rootId: string) =>
 		request<Item[]>(`/api/threads/${platform}/${encodeURIComponent(rootId)}`),
-	search: (q: string, mode: 'text' | 'semantic', filters: ItemFilters, limit = 30, offset = 0) =>
-		request<SearchResult>(`/api/search${query({ q, mode, ...filters, limit, offset })}`),
+	search: (
+		q: string,
+		mode: 'text' | 'semantic',
+		sort: SearchSort,
+		match: MatchField | undefined,
+		filters: ItemFilters,
+		limit = 30,
+		offset = 0
+	) =>
+		request<SearchResult>(
+			`/api/search${query({ q, mode, sort, match, ...filters, limit, offset })}`
+		),
 	chats: (platform: string) => request<Chat[]>(`/api/chats/${platform}`),
 	facets: () => request<Record<string, Facets>>('/api/facets'),
 	stats: () => request<ArchiveStats[]>('/api/archive/stats'),
-	authors: (platform: string, prefix: string) =>
-		request<{ author: string; items: number }[]>(`/api/authors/${platform}${query({ prefix })}`),
+	authors: (platforms: string | undefined, prefix: string) =>
+		request<{ author: string; items: number }[]>(
+			`/api/authors${query({ platforms, prefix, limit: 8 })}`
+		),
 	recoverMedia: (platform: string, id: string) =>
 		request<Item>(`/api/items/${platform}/${encodeURIComponent(id)}/recover-media`, {
 			method: 'POST'
@@ -252,11 +301,7 @@ export const api = {
 	/* Control plane */
 	status: () => request<ControlStatus>('/api/status'),
 	run: (body: Record<string, unknown>) =>
-		request<{ started: string }>('/api/run', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body)
-		}),
+		post<{ started: string }>('/api/run', body),
 	cycle: (platform: string) =>
 		request<{ started: string }>(`/api/cycle/${platform}`, { method: 'POST' }),
 	schedule: (body: {
@@ -265,22 +310,14 @@ export const api = {
 		categories: string[];
 		interval_minutes: number;
 	}) =>
-		request<{ started: string }>('/api/schedule', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body)
-		}),
+		post<{ started: string }>('/api/schedule', body),
 	sources: () => request<SourcesResult>('/api/sources'),
 	sourceAction: (
 		action: 'add' | 'remove' | 'run' | 'enabled',
 		body: { platform: string; target: string; kind?: string | null },
 		params = ''
 	) =>
-		request<{ started: string }>(`/api/sources/${action}${params}`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(body)
-		}),
+		post<{ started: string }>(`/api/sources/${action}${params}`, body),
 	cancel: (jobId: number) => request<{ started: string }>(`/api/cancel/${jobId}`, { method: 'POST' }),
 	pairStart: (platform: string) =>
 		request<{ started?: string; error?: string }>(`/api/pair/${platform}`, { method: 'POST' }),

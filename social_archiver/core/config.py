@@ -22,6 +22,11 @@ TELEGRAM_CHAT_ERRORS = int(os.getenv("TELEGRAM_CHAT_ERRORS", "0")) or None
 TELEGRAM_MAX_FILE_SIZE_MB = int(os.getenv("TELEGRAM_MAX_FILE_SIZE_MB", "50"))
 TELEGRAM_BOT_API_URL = os.getenv("TELEGRAM_BOT_API_URL", "")
 
+# Web access. The UI, the API and the MCP endpoint share one owner password. MCP clients such
+# as claude.ai sign in through OAuth, whose issuer must be the public address clients reach.
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
+
 # Every platform this build serves; each owns a database, a worker, and a schedule row
 PLATFORMS = ("instagram", "reddit", "twitter", "whatsapp")
 

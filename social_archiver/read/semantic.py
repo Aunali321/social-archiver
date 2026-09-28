@@ -11,8 +11,11 @@ from pathlib import Path
 
 from social_archiver.core import config
 from social_archiver.core.config import PLATFORMS
+from social_archiver.core.database import Item
 from social_archiver.core.milvus_manager import MilvusManager
 from social_archiver.llm import embed_client
+from social_archiver.read.models import ItemFilters
+from social_archiver.read.store import ArchiveReader
 
 
 @dataclass(slots=True)
@@ -81,3 +84,16 @@ async def search(query: str, platforms: tuple[str, ...], limit: int = 20) -> lis
             seen.add(key)
             unique.append(hit)
     return unique[:limit]
+
+
+async def hydrate(
+    reader: ArchiveReader, hits: list[SemanticHit], filters: ItemFilters
+) -> list[tuple[SemanticHit, Item]]:
+    """Hits with their archived items, in rank order. The vector store knows nothing of the
+    archive's filters, so hits whose item fails them drop out here."""
+    held = {
+        platform: await reader.get_many(platform, {h.item_id for h in hits if h.platform == platform}, filters)
+        for platform in {h.platform for h in hits}
+        if not filters.platforms or platform in filters.platforms
+    }
+    return [(hit, item) for hit in hits if (item := held.get(hit.platform, {}).get(hit.item_id))]

@@ -8,6 +8,7 @@ from social_archiver.read.models import (
     Page,
     PlatformStats,
     SearchHit,
+    SearchSort,
 )
 from social_archiver.read.store import ArchiveReader
 
@@ -20,4 +21,5 @@ __all__ = [
     "Page",
     "PlatformStats",
     "SearchHit",
+    "SearchSort",
 ]

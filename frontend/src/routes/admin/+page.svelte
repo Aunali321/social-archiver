@@ -2,6 +2,7 @@
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import Play from '@lucide/svelte/icons/play';
 	import QrCode from '@lucide/svelte/icons/qr-code';
+	import LogOut from '@lucide/svelte/icons/log-out';
 	import { api, type ControlStatus, type SourcesResult } from '$lib/api';
 	import { platformLabel } from '$lib/format';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
@@ -130,7 +131,18 @@
 <svelte:head><title>Admin · Archive</title></svelte:head>
 
 <div class="mx-auto max-w-4xl px-4 pt-6">
-	<h1 class="mb-4 text-headline text-on-surface">Admin</h1>
+	<div class="mb-4 flex items-center justify-between gap-4">
+		<h1 class="text-headline text-on-surface">Admin</h1>
+		<Button
+			variant="text"
+			onclick={async () => {
+				await api.logout();
+				location.assign('/login');
+			}}
+		>
+			<LogOut size={18} /> Sign out
+		</Button>
+	</div>
 
 	{#if error && !status}
 		<EmptyState title="Couldn't reach the archiver" detail={error} error>

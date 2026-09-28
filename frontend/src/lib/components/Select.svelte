@@ -14,7 +14,7 @@
 	bind:value
 	aria-label={label}
 	{onchange}
-	class="h-8 cursor-pointer rounded-sm border border-outline-variant bg-transparent px-2 text-label-lg text-on-surface-variant outline-none focus-visible:border-primary"
+	class="h-8 max-w-full cursor-pointer rounded-sm border border-outline-variant bg-transparent px-2 text-label-lg text-on-surface-variant outline-none focus-visible:border-primary"
 >
 	{#if allLabel != null}<option value="">{allLabel}</option>{/if}
 	{#each options as option (option.value)}

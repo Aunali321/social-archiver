@@ -8,17 +8,27 @@ reuses the archival pipeline's own ensure_media on an explicit request, never on
 import importlib
 from dataclasses import asdict
 from datetime import datetime
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from social_archiver.core import config
 from social_archiver.core.config import PLATFORMS
 from social_archiver.core.database import Database, Item
 from social_archiver.core.jobs import ensure_media
 from social_archiver.read import conversation, semantic
-from social_archiver.read.models import ItemFilters, is_seed
+from social_archiver.read.models import (
+    ItemFilters,
+    ItemKind,
+    MatchField,
+    MediaFilter,
+    PostFormat,
+    SearchSort,
+    is_seed,
+)
+from social_archiver.read.query import parse
 from social_archiver.read.store import ArchiveReader
 
 router = APIRouter()
@@ -225,108 +235,97 @@ async def with_context(items: list[Item]) -> list[ItemOut]:
     return entries
 
 
-def _filters(
-    platforms: str | None,
-    category: str | None,
-    author: str | None,
-    subreddit: str | None,
-    chat: str | None,
-    collection: str | None,
-    origin: str | None,
-    archive_status: str | None,
-    source_target: str | None,
-    has_media: bool | None,
-    seeds_only: bool,
-    date_from: datetime | None,
-    date_to: datetime | None,
-) -> ItemFilters:
-    named = tuple(p.strip() for p in platforms.split(",") if p.strip()) if platforms else ()
-    if unknown := set(named) - set(PLATFORMS):
-        raise HTTPException(400, f"unknown platform {', '.join(sorted(unknown))}")
-    return ItemFilters(
-        platforms=named,
-        category=category,
-        author=author,
-        subreddit=subreddit,
-        chat=chat,
-        collection=collection,
-        origin=origin,
-        archive_status=archive_status,
-        source_target=source_target,
-        has_media=has_media,
-        seeds_only=seeds_only,
-        date_from=date_from,
-        date_to=date_to,
-    )
+class FilterParams(BaseModel):
+    """The ItemFilters fields as query parameters, shared by the timeline and search."""
+
+    platforms: str | None = None  # comma-separated
+    category: str | None = None
+    author: str | None = None
+    subreddit: str | None = None
+    chat: str | None = None
+    collection: str | None = None
+    origin: str | None = None
+    archive_status: str | None = None
+    source_target: str | None = None
+    has_media: bool | None = None
+    media: MediaFilter | None = None
+    kind: ItemKind | None = None
+    exclude_kinds: list[ItemKind] = []
+    has_link: bool | None = None
+    min_likes: int | None = None
+    min_views: int | None = None
+    chat_name: str | None = None
+    shared_by: str | None = None
+    post_format: PostFormat | None = None
+    seeds_only: bool = False
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+
+    def filters(self) -> ItemFilters:
+        named = tuple(p.strip() for p in self.platforms.split(",") if p.strip()) if self.platforms else ()
+        if unknown := set(named) - set(PLATFORMS):
+            raise HTTPException(400, f"unknown platform {', '.join(sorted(unknown))}")
+        fields = self.model_dump(include=set(FilterParams.model_fields) - {"platforms", "exclude_kinds"})
+        return ItemFilters(platforms=named, exclude_kinds=tuple(self.exclude_kinds), **fields)
+
+
+# FastAPI reads a model as the whole query string only when it is the sole query parameter,
+# so each endpoint's own parameters extend the filters rather than sit beside them
+
+
+class ItemsParams(FilterParams):
+    cursor: str | None = None
+    limit: int = Field(50, ge=1, le=100)
+
+
+class SearchParams(FilterParams):
+    q: str = Field(min_length=1)
+    mode: Literal["text", "semantic"] = "text"
+    sort: SearchSort = SearchSort.RELEVANCE
+    match: MatchField | None = None
+    limit: int = Field(30, ge=1, le=100)
+    offset: int = Field(0, ge=0)
 
 
 @router.get("/api/items", response_model=PageOut)
-async def list_items(
-    platforms: str | None = None,
-    category: str | None = None,
-    author: str | None = None,
-    subreddit: str | None = None,
-    chat: str | None = None,
-    collection: str | None = None,
-    origin: str | None = None,
-    archive_status: str | None = None,
-    source_target: str | None = None,
-    has_media: bool | None = None,
-    seeds_only: bool = False,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
-    cursor: str | None = None,
-    limit: int = Query(50, ge=1, le=100),
-) -> PageOut:
-    filters = _filters(
-        platforms, category, author, subreddit, chat, collection, origin,
-        archive_status, source_target, has_media, seeds_only, date_from, date_to,
-    )  # fmt: skip
+async def list_items(params: Annotated[ItemsParams, Query()]) -> PageOut:
     try:
-        page = await reader.list_items(filters, cursor=cursor, limit=limit)
+        page = await reader.list_items(params.filters(), cursor=params.cursor, limit=params.limit)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     return PageOut(items=await with_context(page.items), next_cursor=page.next_cursor)
 
 
 @router.get("/api/search", response_model=SearchOut)
-async def search(
-    q: str = Query(min_length=1),
-    mode: str = Query("text", pattern="^(text|semantic)$"),
-    platforms: str | None = None,
-    category: str | None = None,
-    author: str | None = None,
-    subreddit: str | None = None,
-    chat: str | None = None,
-    has_media: bool | None = None,
-    seeds_only: bool = False,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
-    limit: int = Query(30, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-) -> SearchOut:
-    filters = _filters(
-        platforms, category, author, subreddit, chat, None, None, None, None, has_media, seeds_only, date_from, date_to
-    )
+async def search(params: Annotated[SearchParams, Query()]) -> SearchOut:
+    """`q` takes inline operators as well as words; see read.query."""
     semantic_platforms = semantic.available()
-    if mode == "semantic":
-        if not semantic_platforms:
-            raise HTTPException(
-                400, "semantic search is not configured; EMBEDDING_ENABLED is off or nothing is embedded"
+    try:
+        if params.mode == "semantic":
+            if not semantic_platforms:
+                raise HTTPException(
+                    400, "semantic search is not configured; EMBEDDING_ENABLED is off or nothing is embedded"
+                )
+            parsed = parse(params.q, params.filters())
+            if not parsed.text:
+                raise HTTPException(400, "semantic search needs words to search for, not only operators")
+            found = await semantic.hydrate(
+                reader, await semantic.search(parsed.text, parsed.filters.platforms, limit=params.limit), parsed.filters
             )
-        hits = await semantic.search(q, filters.platforms, limit=limit)
-        found = [(hit, item) for hit in hits if (item := await reader.get(hit.platform, hit.item_id))]
-        entries = await with_context([item for _, item in found])
-        return SearchOut(
-            mode="semantic",
-            hits=[
-                SearchHitOut(item=entry, snippet=hit.caption, score=hit.score)
-                for (hit, _), entry in zip(found, entries, strict=True)
-            ],
-            semantic_platforms=semantic_platforms,
+            entries = await with_context([item for _, item in found])
+            return SearchOut(
+                mode="semantic",
+                hits=[
+                    SearchHitOut(item=entry, snippet=hit.caption, score=hit.score)
+                    for (hit, _), entry in zip(found, entries, strict=True)
+                ],
+                semantic_platforms=semantic_platforms,
+            )
+        hits = await reader.search(
+            params.q, params.filters(), params.sort, limit=params.limit, offset=params.offset, match=params.match
         )
-
-    hits = await reader.search(q, filters, limit=limit, offset=offset)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     entries = await with_context([hit.item for hit in hits])
     return SearchOut(
         mode="text",
@@ -402,9 +401,19 @@ async def chats(platform: str) -> list[ChatOut]:
     return [ChatOut(**asdict(c)) for c in await reader.chats(platform)]
 
 
-@router.get("/api/authors/{platform}", response_model=list[AuthorOut])
-async def authors(platform: str, prefix: str = "", limit: int = Query(20, ge=1, le=100)) -> list[AuthorOut]:
-    return [AuthorOut(author=a.author, items=a.items) for a in await reader.authors(platform, prefix, limit)]
+@router.get("/api/authors", response_model=list[AuthorOut])
+async def authors(
+    platforms: str | None = None, prefix: str = "", limit: int = Query(20, ge=1, le=100)
+) -> list[AuthorOut]:
+    """Most prolific authors starting with `prefix`, for autocomplete. A name used on several
+    platforms counts once, with its items summed."""
+    selected = FilterParams(platforms=platforms).filters().platforms or tuple(await reader.present())
+    counts: dict[str, int] = {}
+    for platform in selected:
+        for found in await reader.authors(platform, prefix, limit):
+            counts[found.author] = counts.get(found.author, 0) + found.items
+    ranked = sorted(counts.items(), key=lambda entry: entry[1], reverse=True)[:limit]
+    return [AuthorOut(author=author, items=items) for author, items in ranked]
 
 
 @router.get("/api/facets", response_model=dict[str, FacetsOut])

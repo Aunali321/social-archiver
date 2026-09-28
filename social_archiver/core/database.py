@@ -259,6 +259,24 @@ MIGRATIONS = (
         "UPDATE items SET caption_status = 'unavailable' "
         "WHERE caption_status = 'pending' AND archive_status IN ('tombstone', 'skipped')",
     ),
+    # Stemmed search, so "recipes" finds "recipe" and "running" finds "run". An FTS table's
+    # tokenizer is fixed at creation, so the index is recreated under it and rebuilt. The
+    # triggers address the table by name and feed the new one unchanged.
+    # Search matches authors and chat names case-insensitively (from:Karpathy), which only a
+    # NOCASE index can serve without scanning every row.
+    (
+        "CREATE INDEX IF NOT EXISTS idx_items_author_nocase ON items(author_username COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_items_chat_name_nocase ON items(chat_name COLLATE NOCASE)",
+        "DROP TABLE items_fts",
+        """
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+                        text, vlm_description, author_username, chat_name,
+                        content='items', content_rowid='rowid',
+                        tokenize='porter unicode61 remove_diacritics 2'
+                    )
+        """,
+        "INSERT INTO items_fts(items_fts) VALUES ('rebuild')",
+    ),
 )
 
 

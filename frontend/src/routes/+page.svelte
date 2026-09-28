@@ -2,21 +2,16 @@
 	import { onMount } from 'svelte';
 	import Inbox from '@lucide/svelte/icons/inbox';
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
-	import { api, type Facets, type Item, type ItemFilters } from '$lib/api';
-	import TimelineFilters from '$lib/components/TimelineFilters.svelte';
+	import { api, type Facets, type Item } from '$lib/api';
+	import { Filters } from '$lib/filters.svelte';
+	import FilterPanel from '$lib/components/FilterPanel.svelte';
 	import ItemCard from '$lib/components/ItemCard.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 
 	let platforms: string[] = $state([]);
 	let facets: Record<string, Facets> = $state({});
-
-	let selectedPlatform = $state('');
-	let category = $state('');
-	let subreddit = $state('');
-	let origin = $state('');
-	let mediaOnly = $state(false);
-	let seedsOnly = $state(false);
+	const filters = new Filters();
 
 	let items: Item[] = $state([]);
 	let cursor: string | null = $state(null);
@@ -24,17 +19,6 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let generation = 0;
-
-	const filters = $derived<ItemFilters>({
-		platforms: selectedPlatform || undefined,
-		category: category || undefined,
-		subreddit: subreddit || undefined,
-		origin: origin || undefined,
-		has_media: mediaOnly ? true : undefined,
-		seeds_only: seedsOnly ? true : undefined
-	});
-
-	const activeFacets = $derived(selectedPlatform ? (facets[selectedPlatform] ?? null) : null);
 
 	async function reload() {
 		const mine = ++generation;
@@ -49,7 +33,7 @@
 		if (loading || exhausted) return;
 		loading = true;
 		try {
-			const page = await api.items(filters, cursor);
+			const page = await api.items(filters.query, cursor);
 			if (mine !== generation) return;
 			items.push(...page.items);
 			cursor = page.next_cursor;
@@ -59,24 +43,6 @@
 		} finally {
 			if (mine === generation) loading = false;
 		}
-	}
-
-	function selectPlatform(platform: string) {
-		selectedPlatform = selectedPlatform === platform ? '' : platform;
-		category = '';
-		subreddit = '';
-		origin = '';
-		reload();
-	}
-
-	function toggleMediaOnly() {
-		mediaOnly = !mediaOnly;
-		reload();
-	}
-
-	function toggleSeedsOnly() {
-		seedsOnly = !seedsOnly;
-		reload();
 	}
 
 	onMount(() => {
@@ -104,21 +70,7 @@
 	<aside class="hidden xl:block">
 		<div class="sticky top-6">
 			<h1 class="mb-5 text-headline text-on-surface">Timeline</h1>
-			<TimelineFilters
-				variant="panel"
-				{platforms}
-				facets={activeFacets}
-				{selectedPlatform}
-				bind:category
-				bind:subreddit
-				bind:origin
-				{mediaOnly}
-				{seedsOnly}
-				onPlatform={selectPlatform}
-				onMediaOnly={toggleMediaOnly}
-				onSeedsOnly={toggleSeedsOnly}
-				onFacet={reload}
-			/>
+			<FilterPanel variant="panel" {platforms} {facets} {filters} onchange={reload} />
 		</div>
 	</aside>
 
@@ -126,21 +78,7 @@
 		<div class="xl:hidden">
 			<h1 class="mb-4 text-headline text-on-surface">Timeline</h1>
 			<div class="mb-4">
-				<TimelineFilters
-					variant="row"
-					{platforms}
-					facets={activeFacets}
-					{selectedPlatform}
-					bind:category
-					bind:subreddit
-					bind:origin
-					{mediaOnly}
-					{seedsOnly}
-					onPlatform={selectPlatform}
-					onMediaOnly={toggleMediaOnly}
-					onSeedsOnly={toggleSeedsOnly}
-					onFacet={reload}
-				/>
+				<FilterPanel variant="row" {platforms} {facets} {filters} onchange={reload} />
 			</div>
 		</div>
 

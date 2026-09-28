@@ -1,4 +1,4 @@
-"""One console entry for everything: platform jobs, the server, the daemon, search, MCP.
+"""One console entry for everything: platform jobs, the server, the daemon, search.
 
 `social-archiver reddit archive` is `python -m social_archiver.platforms.reddit archive` with
 the argv shifted, so each platform's own parser stays the single definition of its flags.
@@ -15,7 +15,7 @@ from social_archiver.core.config import PLATFORMS, ConfigError
 
 logger = logging.getLogger(__name__)
 
-_COMMANDS = ("serve", "daemon", "search", "stats", "mcp", *PLATFORMS)
+_COMMANDS = ("serve", "daemon", "search", "stats", *PLATFORMS)
 
 
 def _delegate(module: str, prog: str, argv: list[str]):
@@ -33,8 +33,6 @@ def main():
                 _delegate("social_archiver.api.__main__", "social-archiver serve", rest)
             case "daemon":
                 _delegate("social_archiver.daemon", "social-archiver daemon", rest)
-            case "mcp":
-                _delegate("social_archiver.mcp_server", "social-archiver mcp", rest)
             case "search":
                 _search(rest)
             case "stats":
@@ -48,7 +46,6 @@ def main():
                       daemon                    scheduler and workers, no HTTP
                       search <query>            search the archive (--semantic for vector search)
                       stats                     per-platform archive totals
-                      mcp                       MCP server on stdio
                       {" | ".join(PLATFORMS)}
                                                 a platform's own jobs; see `social-archiver <platform> -h`""")
                 )

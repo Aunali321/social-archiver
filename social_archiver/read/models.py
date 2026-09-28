@@ -6,6 +6,7 @@ import base64
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 
 from social_archiver.core.database import Item
 
@@ -24,6 +25,59 @@ def is_seed(item: Item) -> bool:
     return seeds is None or item.origin is None or item.origin in seeds
 
 
+class MediaFilter(StrEnum):
+    IMAGE = "image"
+    VIDEO = "video"
+    GIF = "gif"
+    AUDIO = "audio"
+    STICKER = "sticker"
+    DOCUMENT = "document"
+
+
+# Each platform's own media_types vocabulary, grouped under the kinds a reader asks for.
+# Reddit's "preview" is a link's thumbnail, not an image post, so it matches none.
+MEDIA_TYPES = {
+    MediaFilter.IMAGE: ("photo", "image"),
+    MediaFilter.VIDEO: ("video",),
+    MediaFilter.GIF: ("gif", "animated_gif"),
+    MediaFilter.AUDIO: ("audio",),
+    MediaFilter.STICKER: ("sticker",),
+    MediaFilter.DOCUMENT: ("document",),
+}
+
+
+class ItemKind(StrEnum):
+    """An item's place in its conversation. A reddit comment and a WhatsApp quoted reply are
+    both replies; a reddit submission and a standalone message are both posts."""
+
+    POST = "post"
+    REPLY = "reply"
+    REPOST = "repost"
+    QUOTE = "quote"
+
+
+class PostFormat(StrEnum):
+    REEL = "reel"
+    POST = "post"
+    CAROUSEL = "carousel"
+
+
+# Instagram's product_type values behind each format
+PRODUCT_TYPES = {
+    PostFormat.REEL: ("clips",),
+    PostFormat.POST: ("feed",),
+    PostFormat.CAROUSEL: ("carousel_container",),
+}
+
+
+class MatchField(StrEnum):
+    """Which indexed text a search term must appear in."""
+
+    TEXT = "text"
+    MEDIA = "media"
+    NAMES = "names"
+
+
 @dataclass(slots=True)
 class ItemFilters:
     """Every field is optional; unset means unfiltered. `platforms` empty means all."""
@@ -38,9 +92,24 @@ class ItemFilters:
     archive_status: str | None = None
     source_target: str | None = None
     has_media: bool | None = None
+    media: MediaFilter | None = None
+    kind: ItemKind | None = None
+    exclude_kinds: tuple[ItemKind, ...] = ()
+    has_link: bool | None = None
+    min_likes: int | None = None
+    min_views: int | None = None
+    chat_name: str | None = None
+    shared_by: str | None = None
+    post_format: PostFormat | None = None
     seeds_only: bool = False  # only what the user acted on; adopted context hidden
     date_from: datetime | None = None
     date_to: datetime | None = None
+
+
+class SearchSort(StrEnum):
+    RELEVANCE = "relevance"
+    NEWEST = "newest"
+    OLDEST = "oldest"
 
 
 @dataclass(slots=True)

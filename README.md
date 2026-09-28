@@ -112,7 +112,16 @@ archive twice at once. Different platforms run in parallel — separate APIs, se
 The queue lives in `data/jobs.db`, so a restart loses nothing and a run that died is marked
 interrupted rather than vanishing. The UI shows the queue, recent runs and their errors.
 
-It has no authentication and can start jobs, so keep it on the LAN.
+Everything sits behind one owner password. Set both before starting it:
+
+```env
+PUBLIC_URL=https://archive.example.com   # where browsers and MCP clients reach it
+WEB_PASSWORD=a-long-random-password
+```
+
+`PUBLIC_URL` is also the OAuth issuer for the MCP endpoint, so it must be the exact public
+address. Behind a reverse proxy that does its own sign-in (Pangolin, Authelia), turn that
+off for this site: an MCP client cannot pass a proxy's login, and the app now guards itself.
 
 ```bash
 uv run python -m social_archiver.api                        # UI + scheduler + workers
@@ -166,11 +175,22 @@ uv run social-archiver search "your query" --platform reddit --category saved
 uv run social-archiver stats
 ```
 
-Expose it to an MCP client (read-only tools over stdio):
+Search takes operators alongside words, in the UI, the CLI and the MCP tool alike:
+`from:name in:"chat name" r:subreddit platform:reddit after:2025-01-01 before:2025-02-01
+has:video|image|gif|audio|sticker|document|media|link is:post|reply|comment|retweet|quote
+is:reel|carousel|group|dm|liked likes:>100 views:>1000 match:text|media|names`, plus
+`"phrases"`, `prefix*`, `-exclude`, `a OR b` and `NEAR(a b, 5)`. `-is:` and `-has:media|link`
+negate. Operators alone list what matches them, newest first.
 
-```json
-{"mcpServers": {"social-archiver": {"command": "uv", "args": ["run", "social-archiver", "mcp"]}}}
+The service also serves read-only MCP tools at `PUBLIC_URL/mcp`. Add that URL as a custom
+connector in claude.ai, or in any client that speaks MCP over HTTP with OAuth:
+
+```bash
+claude mcp add --transport http archive https://archive.example.com/mcp
 ```
+
+The client registers itself, opens the archive's sign-in page, and asks you to allow it.
+Revoking happens from the client; a password change does not end existing connections.
 
 ### Account exports
 

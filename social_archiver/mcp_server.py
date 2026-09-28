@@ -1,14 +1,16 @@
 """MCP server over the read layer, so an assistant can query the archive.
 
 Read-only by construction: every tool goes through ArchiveReader's mode=ro connections.
-Runs on stdio — `social-archiver mcp` — pointed at by a client config, e.g.:
-    {"mcpServers": {"social-archiver": {"command": "social-archiver", "args": ["mcp"]}}}
+Served over streamable HTTP at /mcp by the web process (see social_archiver.api), behind the
+same owner sign-in as the UI, so any MCP host that speaks OAuth can connect by URL alone.
 """
 
 from datetime import datetime
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import OAuthAuthorizationServerProvider
+from mcp.server.auth.settings import AuthSettings
 from mcp.types import ToolAnnotations
 
 from social_archiver.core import config
@@ -17,14 +19,8 @@ from social_archiver.core.database import Item
 from social_archiver.read import ArchiveReader, ItemFilters
 from social_archiver.read import conversation as conversations
 from social_archiver.read import semantic as semantic_search
-from social_archiver.read.models import is_seed
+from social_archiver.read.models import SearchSort, is_seed
 
-mcp = MCPServer(
-    "social-archiver",
-    instructions="A personal archive of twitter, reddit, instagram and whatsapp: liked/saved "
-    "posts, chat history, and everything each pulled in. Search it, browse it, or pull whole "
-    "threads and conversations.",
-)
 reader = ArchiveReader(config.DATA_DIR)
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
@@ -69,22 +65,48 @@ def _platforms(platform: str | None) -> tuple[str, ...]:
     return (platform,) if platform else ()
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def search_archive(
-    query: str, platform: str | None = None, semantic: bool = False, limit: int = 20
+    query: str,
+    platform: str | None = None,
+    semantic: bool = False,
+    sort: SearchSort = SearchSort.RELEVANCE,
+    author: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    has_media: bool | None = None,
+    seeds_only: bool = False,
+    limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Search the social media archive (twitter, reddit, instagram, whatsapp). Full-text by
-    default; semantic=True uses vector search when embeddings are configured."""
-    selected = _platforms(platform)
+    """Search the social media archive (twitter, reddit, instagram, whatsapp).
+
+    Full-text by default: every word must match, "quoted phrases" match in order, word*
+    matches a prefix, -word excludes, `a OR b` takes either and NEAR(a b, 5) keeps words
+    within five of each other. The query also takes operators, alone or with words:
+    from:author  in:"whatsapp chat name"  r:subreddit  platform:reddit  category:x
+    origin:x  shared:user  after:YYYY-MM-DD  before:YYYY-MM-DD  likes:>N  views:>N
+    has:media|link|image|video|gif|audio|sticker|document  -has:media|link
+    is:post|reply|comment|retweet|quote (negatable)  is:reel|carousel|group|dm|liked
+    match:text|media|names (restrict words to post text, media descriptions, or names).
+    semantic=True uses vector search when embeddings are configured and always ranks by
+    relevance. Dates are ISO (YYYY-MM-DD)."""
+    filters = ItemFilters(
+        platforms=_platforms(platform),
+        author=author,
+        has_media=has_media,
+        seeds_only=seeds_only,
+        date_from=datetime.fromisoformat(date_from) if date_from else None,
+        date_to=datetime.fromisoformat(date_to) if date_to else None,
+    )
     if semantic:
-        hits = await semantic_search.search(query, selected, limit=limit)
-        found = [(await reader.get(h.platform, h.item_id), h.caption) for h in hits]
-        return [{**_item(item), "matched": caption} for item, caption in found if item]
-    hits = await reader.search(query, ItemFilters(platforms=selected), limit=limit)
+        hits = await semantic_search.search(query, filters.platforms, limit=limit)
+        return [
+            {**_item(item), "matched": hit.caption}
+            for hit, item in await semantic_search.hydrate(reader, hits, filters)
+        ]
+    hits = await reader.search(query, filters, sort, limit=limit)
     return [{**_item(h.item), "matched": h.snippet} for h in hits]
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_items(
     platform: str | None = None,
     category: str | None = None,
@@ -114,7 +136,6 @@ async def list_items(
     return {"items": [_item(i) for i in page.items], "next_cursor": page.next_cursor}
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_item(platform: str, item_id: str) -> dict[str, Any]:
     """One item with its graph neighbours: parent, quoted/retweeted post, what led to it
     being archived, and direct replies."""
@@ -130,7 +151,6 @@ async def get_item(platform: str, item_id: str) -> dict[str, Any]:
     return out
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_conversation(platform: str, item_id: str) -> dict[str, Any]:
     """A twitter/reddit discussion assembled around one item: `ancestors` (root first) above
     it, `replies` as a nested tree below it. Each entry carries is_seed — False means the
@@ -152,14 +172,12 @@ async def get_conversation(platform: str, item_id: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def get_thread(platform: str, root_id: str) -> list[dict[str, Any]]:
     """A whole thread or conversation in chronological order. For WhatsApp, root_id is
     '<chat_jid>:<YYYY-MM-DD>' — one chat-day."""
     return [_item(i) for i in await reader.thread(platform, root_id)]
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def list_chats(platform: str = "whatsapp") -> list[dict[str, Any]]:
     """Conversations with name, message count and latest message, newest first."""
     return [
@@ -174,7 +192,6 @@ async def list_chats(platform: str = "whatsapp") -> list[dict[str, Any]]:
     ]
 
 
-@mcp.tool(annotations=_READ_ONLY)
 async def archive_stats() -> list[dict[str, Any]]:
     """What the archive holds: totals, categories and date range per platform."""
     out = []
@@ -193,9 +210,15 @@ async def archive_stats() -> list[dict[str, Any]]:
     return out
 
 
-def main():
-    mcp.run()
-
-
-if __name__ == "__main__":
-    main()
+def create(provider: OAuthAuthorizationServerProvider, auth: AuthSettings) -> MCPServer:
+    server = MCPServer(
+        "social-archiver",
+        instructions="A personal archive of twitter, reddit, instagram and whatsapp: liked/saved "
+        "posts, chat history, and everything each pulled in. Search it, browse it, or pull whole "
+        "threads and conversations.",
+        auth_server_provider=provider,
+        auth=auth,
+    )
+    for tool in (search_archive, list_items, get_item, get_conversation, get_thread, list_chats, archive_stats):
+        server.add_tool(tool, annotations=_READ_ONLY)
+    return server

@@ -11,7 +11,6 @@ timestamp formats across platforms cannot skip or repeat rows within one archive
 """
 
 import re
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -21,20 +20,65 @@ import aiosqlite
 from social_archiver.core.config import PLATFORMS
 from social_archiver.core.database import _ITEM_COLUMNS, Item
 from social_archiver.read.models import (
+    MEDIA_TYPES,
+    PRODUCT_TYPES,
     SEED_ORIGINS,
     AuthorCount,
     ChatSummary,
     Facets,
     ItemFilters,
+    ItemKind,
+    MatchField,
     Page,
     PlatformStats,
     SearchHit,
+    SearchSort,
     decode_cursor,
     encode_cursor,
 )
+from social_archiver.read.query import parse
 
 _SORT = "ORDER BY created_at DESC, item_id DESC"
+_KIND = {
+    ItemKind.POST: "{p}in_reply_to_status_id IS NULL AND {p}is_retweet = 0",
+    ItemKind.REPLY: "{p}in_reply_to_status_id IS NOT NULL",
+    ItemKind.REPOST: "{p}is_retweet = 1",
+    ItemKind.QUOTE: "{p}quoted_tweet_id IS NOT NULL",
+}
 _FTS_COLUMNS = ("text", "vlm_description", "author_username", "chat_name")
+
+# bm25 is negative, best first. A name containing the word is rarely what was meant (the
+# author filter covers that), so names weigh little against the post and its media. bm25's
+# length normalisation alone ranks a one-word chat message above a paragraph about the term,
+# so text too short to be about anything is damped.
+_RELEVANCE = (
+    "bm25(items_fts, 1.0, 0.5, 0.1, 0.1) * min(1.0, 0.35 + "
+    "(length(coalesce(items.text, '')) + 0.3 * length(coalesce(items.vlm_description, ''))) / 120.0)"
+)
+_SEARCH_ORDER = {
+    SearchSort.RELEVANCE: "_score, items.item_id DESC",
+    # NULL sorts lowest, so descending already puts undated rows last and keeps the index
+    SearchSort.NEWEST: "items.created_at DESC, items.item_id DESC",
+    SearchSort.OLDEST: "items.created_at IS NULL, items.created_at ASC, items.item_id ASC",
+}
+
+
+@dataclass(slots=True)
+class _Ranked:
+    key: str | None  # raw created_at, compared as stored like the timeline cursor
+    score: float
+    hit: SearchHit
+
+
+def _order(ranked: list[_Ranked], sort: SearchSort):
+    """Merge per-archive results. Relevance ties fall back to recency, so the stable second
+    sort needs the list newest-first before it."""
+    if sort is SearchSort.OLDEST:
+        ranked.sort(key=lambda e: (e.key is None, e.key or "", e.hit.item.item_id))
+        return
+    ranked.sort(key=lambda e: (e.key is not None, e.key or "", e.hit.item.item_id), reverse=True)
+    if sort is SearchSort.RELEVANCE:
+        ranked.sort(key=lambda e: e.score)
 
 
 @dataclass(slots=True)
@@ -107,7 +151,7 @@ class ArchiveReader:
             else:
                 add(f"{p}category = ?", filters.category)
         if filters.author:
-            add(f"{p}author_username = ?", filters.author)
+            add(f"{p}author_username = ? COLLATE NOCASE", filters.author)
         if filters.subreddit:
             add(f"{p}subreddit = ?", filters.subreddit)
         if filters.chat:
@@ -129,6 +173,32 @@ class ArchiveReader:
                 add("0")
         if filters.has_media is not None:
             add(f"{p}has_media = ?", int(filters.has_media))
+        if filters.media:
+            types = MEDIA_TYPES[filters.media]
+            add(
+                f"EXISTS (SELECT 1 FROM json_each({p}media_types) WHERE value IN ({','.join('?' * len(types))}))",
+                *types,
+            )
+        if filters.kind:
+            add(_KIND[filters.kind].format(p=p))
+        for kind in filters.exclude_kinds:
+            add(f"NOT ({_KIND[kind].format(p=p)})")
+        if filters.has_link is not None:
+            add(f"{p}link_url IS {'NOT ' if filters.has_link else ''}NULL")
+        if filters.min_likes is not None:
+            add(f"{p}like_count >= ?", filters.min_likes)
+        if filters.min_views is not None:
+            add(f"{p}view_count >= ?", filters.min_views)
+        if filters.chat_name:
+            if "chat_name" in columns:
+                add(f"{p}chat_name = ? COLLATE NOCASE", filters.chat_name)
+            else:
+                add("0")
+        if filters.shared_by:
+            add(f"{p}shared_by_username = ? COLLATE NOCASE", filters.shared_by)
+        if filters.post_format:
+            types = PRODUCT_TYPES[filters.post_format]
+            add(f"{p}product_type IN ({','.join('?' * len(types))})", *types)
         # Platforms without a seed vocabulary hold only seeds; no clause needed there
         if filters.seeds_only and (seeds := SEED_ORIGINS.get(archive.platform)):
             placeholders = ",".join("?" * len(seeds))
@@ -213,56 +283,69 @@ class ArchiveReader:
     # Search
     # =========================================================================
 
-    async def search(self, query: str, filters: ItemFilters, limit: int = 30, offset: int = 0) -> list[SearchHit]:
+    async def search(
+        self,
+        query: str,
+        filters: ItemFilters,
+        sort: SearchSort = SearchSort.RELEVANCE,
+        limit: int = 30,
+        offset: int = 0,
+        match: MatchField | None = None,
+    ) -> list[SearchHit]:
         """FTS where the archive has been migrated, LIKE elsewhere: a read-only consumer never
-        migrates, so both generations must answer."""
-        hits: list[tuple[float, SearchHit]] = []
-        for platform in self._selected(filters):
+        migrates, so both generations must answer. Operators alone (from:x has:video) list
+        what matches them. Raises ValueError on a query it cannot honour; see read.query."""
+        parsed = parse(query, filters, match)
+        ranked: list[_Ranked] = []
+        for platform in self._selected(parsed.filters):
             archive = await self._archive(platform)
             if archive is None:
                 continue
-            if archive.has_fts:
-                hits += await self._search_fts(archive, query, filters, limit + offset)
+            if archive.has_fts and parsed.expression:
+                ranked += await self._search_fts(archive, parsed.expression, parsed.filters, sort, limit + offset)
             else:
-                hits += await self._search_like(archive, query, filters, limit + offset)
-        hits.sort(key=lambda entry: entry[0])
-        return [hit for _, hit in hits[offset : offset + limit]]
+                text = None if archive.has_fts else parsed.text
+                ranked += await self._search_plain(archive, text, parsed.filters, sort, limit + offset)
+        _order(ranked, sort)
+        return [entry.hit for entry in ranked[offset : offset + limit]]
 
     async def _search_fts(
-        self, archive: _Archive, query: str, filters: ItemFilters, limit: int
-    ) -> list[tuple[float, SearchHit]]:
+        self, archive: _Archive, expression: str, filters: ItemFilters, sort: SearchSort, limit: int
+    ) -> list[_Ranked]:
         clauses, params = self._where(filters, archive, p="items.")
         where = f"AND {' AND '.join(clauses)}" if clauses else ""
         qualified = ", ".join(
             f"items.{name}" if name in archive.columns else f"NULL AS {name}" for name in _ITEM_COLUMNS
         )
-        sql = f"""
-            SELECT {qualified}, rank AS _rank, snippet(items_fts, -1, '[', ']', '…', 18) AS _snippet
-            FROM items_fts JOIN items ON items.rowid = items_fts.rowid
-            WHERE items_fts MATCH ? {where} ORDER BY rank LIMIT ?
-        """
-        try:
-            rows = await archive.connection.execute_fetchall(sql, (query, *params, limit))
-        except sqlite3.OperationalError:
-            # Unbalanced quotes or a stray operator: retry as a literal phrase
-            literal = '"' + query.replace('"', '""') + '"'
-            rows = await archive.connection.execute_fetchall(sql, (literal, *params, limit))
-        return [(row["_rank"], SearchHit(Item.from_row(row), row["_snippet"])) for row in rows]
-
-    async def _search_like(
-        self, archive: _Archive, query: str, filters: ItemFilters, limit: int
-    ) -> list[tuple[float, SearchHit]]:
-        clauses, params = self._where(filters, archive)
-        pattern = "%" + re.sub(r"([%_\\])", r"\\\1", query) + "%"
-        columns = [c for c in _FTS_COLUMNS if c in archive.columns]
-        clauses.insert(0, "(" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in columns) + ")")
-        params = [pattern] * len(columns) + params
         rows = await archive.connection.execute_fetchall(
-            f"SELECT {archive.select} FROM items WHERE {' AND '.join(clauses)} {_SORT} LIMIT ?",
+            f"""
+            SELECT {qualified}, items.created_at AS _key, {_RELEVANCE} AS _score,
+                   snippet(items_fts, -1, '[', ']', '…', 18) AS _snippet
+            FROM items_fts JOIN items ON items.rowid = items_fts.rowid
+            WHERE items_fts MATCH ? {where} ORDER BY {_SEARCH_ORDER[sort]} LIMIT ?
+            """,
+            (expression, *params, limit),
+        )
+        return [_Ranked(row["_key"], row["_score"], SearchHit(Item.from_row(row), row["_snippet"])) for row in rows]
+
+    async def _search_plain(
+        self, archive: _Archive, text: str | None, filters: ItemFilters, sort: SearchSort, limit: int
+    ) -> list[_Ranked]:
+        """Filters alone, plus a substring match on `text` for archives without the index."""
+        clauses, params = self._where(filters, archive, p="items.")
+        if text:
+            pattern = "%" + re.sub(r"([%_\\])", r"\\\1", text) + "%"
+            columns = [c for c in _FTS_COLUMNS if c in archive.columns]
+            clauses.insert(0, "(" + " OR ".join(f"items.{c} LIKE ? ESCAPE '\\'" for c in columns) + ")")
+            params = [pattern] * len(columns) + params
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        # No relevance exists without the index; recency stands in for it
+        order = _SEARCH_ORDER[SearchSort.NEWEST if sort is SearchSort.RELEVANCE else sort]
+        rows = await archive.connection.execute_fetchall(
+            f"SELECT {archive.select}, items.created_at AS _key FROM items {where} ORDER BY {order} LIMIT ?",
             (*params, limit),
         )
-        # No rank exists; recency stands in so merged results stay deterministic
-        return [(float(index), SearchHit(Item.from_row(row), None)) for index, row in enumerate(rows)]
+        return [_Ranked(row["_key"], 0.0, SearchHit(Item.from_row(row), None)) for row in rows]
 
     # =========================================================================
     # Single items and their surroundings
@@ -277,19 +360,21 @@ class ArchiveReader:
         )
         return Item.from_row(rows[0]) if rows else None
 
-    async def get_many(self, platform: str, item_ids: set[str]) -> dict[str, Item]:
+    async def get_many(self, platform: str, item_ids: set[str], filters: ItemFilters | None = None) -> dict[str, Item]:
         """Batch lookup for context resolution: one page of items references at most a few
-        dozen parents/quotes, so a single IN query replaces N gets."""
+        dozen parents/quotes, so a single IN query replaces N gets. `filters` drops the ids
+        that do not match, for results found outside the archive such as vector hits."""
         archive = await self._archive(platform)
         if archive is None or not item_ids:
             return {}
+        clauses, params = self._where(filters, archive) if filters else ([], [])
         ids = list(item_ids)
         found: dict[str, Item] = {}
         for start in range(0, len(ids), 500):
             chunk = ids[start : start + 500]
+            where = " AND ".join([f"item_id IN ({','.join('?' * len(chunk))})", *clauses])
             rows = await archive.connection.execute_fetchall(
-                f"SELECT {archive.select} FROM items WHERE item_id IN ({','.join('?' * len(chunk))})",
-                chunk,
+                f"SELECT {archive.select} FROM items WHERE {where}", (*chunk, *params)
             )
             found.update({row["item_id"]: Item.from_row(row) for row in rows})
         return found
