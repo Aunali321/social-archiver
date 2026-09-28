@@ -16,6 +16,7 @@ import (
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"rsc.io/qr"
 )
 
 func newClient(ctx context.Context, storeDir string) (*whatsmeow.Client, error) {
@@ -85,11 +86,26 @@ func pairLoop(ctx context.Context, cli *whatsmeow.Client, qrChan <-chan whatsmeo
 
 // Plain block characters, no ANSI escapes: the file is rendered inside a <pre>, not a
 // terminal. Written atomically so a reader never sees half a code.
+// writeQRFile writes the code's module grid, one row per line with 1 for a dark module and
+// no quiet zone. The web UI draws it as SVG, which fits any screen, where text art depends
+// on the font it happens to be set in.
 func writeQRFile(path, code string) {
+	grid, err := qr.Encode(code, qr.M)
+	if err != nil {
+		log.Printf("encode pairing QR: %v", err)
+		return
+	}
 	var buf strings.Builder
-	qrterminal.GenerateWithConfig(code, qrterminal.Config{
-		Level: qrterminal.M, Writer: &buf, BlackChar: "██", WhiteChar: "  ", QuietZone: 2,
-	})
+	for y := range grid.Size {
+		for x := range grid.Size {
+			if grid.Black(x, y) {
+				buf.WriteByte('1')
+			} else {
+				buf.WriteByte('0')
+			}
+		}
+		buf.WriteByte('\n')
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(buf.String()), 0o600); err == nil {
 		_ = os.Rename(tmp, path)

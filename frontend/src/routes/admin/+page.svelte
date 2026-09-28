@@ -1,7 +1,7 @@
 <script lang="ts">
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import Play from '@lucide/svelte/icons/play';
-	import QrCode from '@lucide/svelte/icons/qr-code';
+	import QrCodeIcon from '@lucide/svelte/icons/qr-code';
 	import LogOut from '@lucide/svelte/icons/log-out';
 	import { api, type ControlStatus, type SourcesResult } from '$lib/api';
 	import { platformLabel } from '$lib/format';
@@ -11,6 +11,7 @@
 	import Select from '$lib/components/Select.svelte';
 	import TextField from '$lib/components/TextField.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import QrCode from '$lib/components/QrCode.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { toast } from '$lib/components/snackbar.svelte';
@@ -200,7 +201,7 @@
 							bridge: {p.sidecar}
 							{#if p.sidecar === 'not paired'}
 								<Button variant="tonal" onclick={() => pair(p.platform)}>
-									<QrCode size={16} /> Pair
+									<QrCodeIcon size={16} /> Pair
 								</Button>
 							{/if}
 						</div>
@@ -408,8 +409,9 @@
 
 <Dialog open={pairOpen} title="Pair WhatsApp" onclose={closePair}>
 	{#if pairQr}
-		<!-- The QR stays black-on-white in both themes; an inverted code scans unreliably -->
-		<pre class="mx-auto max-w-full overflow-auto rounded-sm bg-white p-2 font-mono text-[7px] leading-[7px] text-black">{pairQr}</pre>
+		<div class="mx-auto w-full max-w-72">
+			<QrCode grid={pairQr} label="WhatsApp pairing QR code" />
+		</div>
 	{/if}
 	<p class="mt-2">{pairMessage}</p>
 	{#snippet actions()}
