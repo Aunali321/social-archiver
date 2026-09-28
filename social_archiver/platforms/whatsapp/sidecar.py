@@ -71,8 +71,12 @@ async def run():
                 _child.terminate()
                 await _child.wait()
                 raise
-            if pairing and not _paired():
-                logger.warning(f"pairing ended without success (exit {code}); press Pair to retry")
+            # Without a device there is nothing to restart: pairing never finished, or the phone
+            # unlinked the bridge and it cleared the session. Idle, so Pair answers at once
+            # instead of after a crash back-off.
+            if not _paired():
+                reason = "pairing ended without success" if pairing else "the phone unlinked this device"
+                logger.warning(f"{reason} (exit {code}); press Pair to link it")
                 continue
             delay = _FATAL_DELAY if clock() - started < _FATAL_EXIT_SECONDS else _RESTART_DELAY
             logger.warning(f"wabridge sync exited with code {code}; restarting in {delay}s")
