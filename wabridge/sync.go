@@ -65,7 +65,7 @@ func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, pair bool
 	}
 
 	log.Printf("syncing as %s into %s", cli.Store.ID, store.Dir)
-	b.media.EnqueueBacklog()
+	go b.media.Feed(ctx)
 
 	select {
 	case <-ctx.Done():
@@ -231,12 +231,7 @@ func (b *bridge) storeMessage(evt *events.Message) bool {
 		return false
 	}
 	if inserted && p.Media != nil && p.Media.DirectPath != "" {
-		b.media.Enqueue(MediaJob{
-			ChatJID: chat.String(), MsgID: p.ID,
-			MediaType: p.Media.Type, MimeType: p.Media.MimeType, DirectPath: p.Media.DirectPath,
-			MediaKey: p.Media.MediaKey, FileSHA: p.Media.FileSHA256, FileEncSHA: p.Media.FileEncSHA256,
-			FileLength: p.Media.FileLength,
-		})
+		b.media.Wake()
 	}
 	if p.QuotedViewOnce != nil && p.QuotedID != "" {
 		b.recoverViewOnce(chat, p)
@@ -259,12 +254,7 @@ func (b *bridge) recoverViewOnce(chat types.JID, p *Parsed) {
 		return
 	}
 	log.Printf("view-once envelope recovered from a quote in %s; downloading", chat)
-	b.media.Enqueue(MediaJob{
-		ChatJID: chat.String(), MsgID: p.QuotedID,
-		MediaType: media.Type, MimeType: media.MimeType, DirectPath: media.DirectPath,
-		MediaKey: media.MediaKey, FileSHA: media.FileSHA256, FileEncSHA: media.FileEncSHA256,
-		FileLength: media.FileLength,
-	})
+	b.media.Wake()
 }
 
 // recordChat keeps the chats table current enough for the archiver to name conversations:

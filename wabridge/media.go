@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 )
@@ -36,41 +38,108 @@ var extensions = map[string]string{
 	"application/pdf": ".pdf",
 }
 
+// mediaPool downloads what the store lists as pending. The store is the queue: a sweep hands
+// every pending file not already in flight to the workers, waiting for a free one rather
+// than dropping it, so a burst far larger than the workers (the history push after
+// pairing) is downloaded in full.
 type mediaPool struct {
 	cli   *whatsmeow.Client
 	store *Store
 	jobs  chan MediaJob
+	wake  chan struct{}
+
+	mu       sync.Mutex
+	inflight map[string]bool
+	// Downloads that failed without expiring wait here for the next tick, so a file that
+	// keeps failing is retried every sweepInterval rather than on every incoming message
+	failed map[string]bool
 }
 
+const sweepInterval = 10 * time.Minute
+
 func newMediaPool(ctx context.Context, cli *whatsmeow.Client, store *Store) *mediaPool {
-	pool := &mediaPool{cli: cli, store: store, jobs: make(chan MediaJob, 512)}
+	pool := &mediaPool{
+		cli: cli, store: store, jobs: make(chan MediaJob), wake: make(chan struct{}, 1),
+		inflight: map[string]bool{}, failed: map[string]bool{},
+	}
 	for range mediaWorkers {
 		go pool.worker(ctx)
 	}
 	return pool
 }
 
-// Enqueue never blocks the event handler: a full queue is deferred to the next backlog
-// sweep rather than stalling the websocket.
-func (p *mediaPool) Enqueue(job MediaJob) {
+// Wake asks for a sweep without ever blocking the event handler; wakes that arrive while
+// one is pending collapse into it.
+func (p *mediaPool) Wake() {
 	select {
-	case p.jobs <- job:
+	case p.wake <- struct{}{}:
 	default:
-		log.Printf("media queue full, %s/%s waits for the next backlog sweep", job.ChatJID, job.MsgID)
 	}
 }
 
-func (p *mediaPool) EnqueueBacklog() {
-	jobs, err := p.store.PendingMedia()
+// Feed sweeps once connected, then again on every wake and every sweepInterval.
+func (p *mediaPool) Feed(ctx context.Context) {
+	ticker := time.NewTicker(sweepInterval)
+	defer ticker.Stop()
+	scheduled := true
+	for {
+		if !p.sweep(ctx, scheduled) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.wake:
+			scheduled = false
+		case <-ticker.C:
+			p.mu.Lock()
+			clear(p.failed)
+			p.mu.Unlock()
+			scheduled = true
+		}
+	}
+}
+
+// sweep returns false once the context ends. Scheduled sweeps report the backlog; a wake
+// per incoming message would flood the log.
+func (p *mediaPool) sweep(ctx context.Context, scheduled bool) bool {
+	pending, err := p.store.PendingMedia()
 	if err != nil {
 		log.Printf("media backlog query failed: %v", err)
-		return
+		return true
 	}
-	if len(jobs) > 0 {
-		log.Printf("media backlog: %d file(s) pending", len(jobs))
+	if scheduled && len(pending) > 0 {
+		log.Printf("media backlog: %d file(s) pending", len(pending))
 	}
-	for _, job := range jobs {
-		p.Enqueue(job)
+	for _, job := range pending {
+		if !p.claim(job.key()) {
+			continue
+		}
+		select {
+		case p.jobs <- job:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+func (p *mediaPool) claim(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.inflight[key] || p.failed[key] {
+		return false
+	}
+	p.inflight[key] = true
+	return true
+}
+
+func (p *mediaPool) release(key string, failed bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.inflight, key)
+	if failed {
+		p.failed[key] = true
 	}
 }
 
@@ -80,9 +149,11 @@ func (p *mediaPool) worker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case job := <-p.jobs:
-			if err := p.download(ctx, job); err != nil {
-				log.Printf("media %s/%s: %v", job.ChatJID, job.MsgID, err)
+			err := p.download(ctx, job)
+			if err != nil {
+				log.Printf("media %s: %v", job.key(), err)
 			}
+			p.release(job.key(), err != nil)
 		}
 	}
 }

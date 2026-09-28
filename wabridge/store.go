@@ -82,6 +82,10 @@ type MediaJob struct {
 	FileLength uint64
 }
 
+func (job MediaJob) key() string {
+	return job.ChatJID + "/" + job.MsgID
+}
+
 func OpenStore(dir string) (*Store, error) {
 	db, err := sql.Open("sqlite3", "file:"+filepath.Join(dir, "wabridge.db")+"?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
