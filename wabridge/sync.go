@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"runtime/debug"
 	"strings"
@@ -74,6 +75,12 @@ func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, pair bool
 		// Exiting is what lets the supervisor see the dead session and offer pairing
 		// again, instead of a zombie holding credentials the phone already revoked.
 		cli.Disconnect()
+		// whatsmeow deletes the revoked device as well, but beside the goroutine that
+		// delivered this event, and exiting here can outrun it. A device left behind in
+		// session.db reads as paired, so the web UI never offers to pair again.
+		if err := cli.Store.Delete(ctx); err != nil {
+			return fmt.Errorf("logged out by the phone, and clearing the session failed: %w", err)
+		}
 		return errors.New("logged out by the phone; pair again")
 	}
 }
