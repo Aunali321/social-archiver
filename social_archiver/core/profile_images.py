@@ -52,7 +52,7 @@ async def download_profile_images(db: Database, platform: str, retry_failed: boo
     if not pending:
         return
     logger.info(f"Fetching {len(pending)} profile picture(s)")
-    semaphore = asyncio.Semaphore(config.DOWNLOAD_CONCURRENCY)
+    semaphore = asyncio.Semaphore(config.PROFILE_IMAGE_CONCURRENCY)
     fetched = failed = 0
 
     async def fetch(image: PendingImage):

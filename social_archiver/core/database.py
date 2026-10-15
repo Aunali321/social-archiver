@@ -399,6 +399,28 @@ MIGRATIONS = (
                     END
         """,
     ),
+    # Reddit usernames are unique regardless of case, and the API and the subreddit dumps spell
+    # some differently, so keying by the name as given split one account in two. The key becomes
+    # the lowercase name; profiles that differed only by case merge, keeping every version.
+    (
+        "UPDATE items SET author_id = lower(author_id) WHERE platform = 'reddit' AND author_id != lower(author_id)",
+        """
+        UPDATE profile_versions SET profile_id = lower(profile_id)
+        WHERE profile_id IN (SELECT profile_id FROM profiles WHERE platform = 'reddit' AND profile_id != lower(profile_id))
+        """,
+        """
+        DELETE FROM profiles
+        WHERE platform = 'reddit' AND profile_id != lower(profile_id)
+          AND lower(profile_id) IN (SELECT profile_id FROM profiles)
+        """,
+        "UPDATE profiles SET profile_id = lower(profile_id) WHERE platform = 'reddit' AND profile_id != lower(profile_id)",
+        """
+        UPDATE profiles SET
+            first_seen = (SELECT min(first_seen) FROM profile_versions v WHERE v.profile_id = profiles.profile_id),
+            last_seen = (SELECT max(last_seen) FROM profile_versions v WHERE v.profile_id = profiles.profile_id)
+        WHERE platform = 'reddit'
+        """,
+    ),
 )
 
 

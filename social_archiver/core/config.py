@@ -123,6 +123,9 @@ RETRY_BACKOFF_BASE = 30  # seconds
 # Video downloads are mostly yt-dlp waiting on the network, with a short ffmpeg mux at the
 # end, so several at once cost little CPU. Kept low to share the machine.
 DOWNLOAD_CONCURRENCY = int(os.getenv("DOWNLOAD_CONCURRENCY", "4"))
+# Profile pictures are small files on image CDNs with no rate limit, and a first backfill is
+# hundreds of thousands of them: at the media setting it would hold its platform's worker for half a day.
+PROFILE_IMAGE_CONCURRENCY = int(os.getenv("PROFILE_IMAGE_CONCURRENCY", "16"))
 
 # Logging
 LOG_ROTATION_DAYS = 30

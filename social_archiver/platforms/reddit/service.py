@@ -14,6 +14,7 @@ from social_archiver.platforms.reddit.archiver import ArchiveJob
 from social_archiver.platforms.reddit.client import RedditClient
 from social_archiver.core.caption import CaptionJob
 from social_archiver.core.embed import IndexJob
+from social_archiver.platforms.reddit.simple_post import account_id
 from social_archiver.platforms.reddit.port import RedditPort
 from social_archiver.platforms.reddit.sources import RedditSourceFetcher
 
@@ -48,7 +49,7 @@ async def profiles(retry_failed: bool = False):
     client = RedditClient()
     try:
         async with Database(config.DATABASE_PATH) as db:
-            await db.profiles.mark_self(await client.verify())
+            await db.profiles.mark_self(account_id(await client.verify()))
     finally:
         await client.close()
 

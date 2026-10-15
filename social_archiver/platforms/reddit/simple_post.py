@@ -13,6 +13,12 @@ PLATFORM = "reddit"
 DELETED_AUTHOR = "[deleted]"
 
 
+def account_id(username: str) -> str:
+    """A Reddit username can never be changed or reused, and is unique regardless of case, so its
+    lowercase form is the account's id: the API and the subreddit dumps disagree on case."""
+    return username.lower()
+
+
 @dataclass(slots=True)
 class RedditMedia:
     type: str  # image, gif, video
@@ -68,8 +74,7 @@ class RedditItem:
 
     @property
     def author_id(self) -> str | None:
-        """A Reddit username can never be changed or reused, so it is the account's id."""
-        return None if self.author == DELETED_AUTHOR else self.author
+        return None if self.author == DELETED_AUTHOR else account_id(self.author)
 
     def to_item(self, category: str) -> Item:
         """Tombstones are record-only. Text-only items are fully archived on
@@ -87,7 +92,7 @@ class RedditItem:
             category=category,
             author_username=self.author,
             author_id=self.author_id,
-            author_profile=ProfileSnapshot(self.author, self.author) if self.author_id else None,
+            author_profile=ProfileSnapshot(self.author_id, self.author) if self.author_id else None,
             post_url=self.permalink,
             text=self.text,
             created_at=self.created_at,
