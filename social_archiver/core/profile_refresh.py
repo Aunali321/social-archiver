@@ -2,8 +2,9 @@
 
 A post's payload carries its author, so an account is read off one of its own archived posts,
 as many to a request as the platform's batch lookup allows. A post the platform refuses means
-trying the account's next one. An account with nothing left to read is recorded as whatever the
-last refusal said, which is also what stops it being asked about again.
+trying the account's next one, up to ATTEMPTS: an account that is gone took every post with it,
+so past a few refusals the next post will be refused too. An account with nothing left to try is
+recorded as whatever the last refusal said, which is also what stops it being asked about again.
 """
 
 import logging
@@ -16,6 +17,8 @@ from social_archiver.core.profile_store import UnobservedProfile
 from social_archiver.core.profiles import ProfileSnapshot
 
 logger = logging.getLogger(__name__)
+
+ATTEMPTS = 3
 
 
 @dataclass(slots=True)
@@ -37,6 +40,8 @@ class AuthorReader(Protocol):
 
 async def refresh_profiles(db: Database, reader: AuthorReader):
     queue = deque(await db.profiles.unobserved())
+    for account in queue:
+        del account.item_ids[ATTEMPTS:]
     logger.info(f"{len(queue)} account(s) never described; reading each off one of its posts")
     described = unreadable = 0
     while queue:
