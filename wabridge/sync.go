@@ -20,6 +20,7 @@ type bridge struct {
 	ctx       context.Context
 	cli       *whatsmeow.Client
 	store     *Store
+	archive   string // the archive's whatsapp.db; "" when the bridge runs without one
 	media     *mediaPool
 	refreshed bool
 	historyMu sync.Mutex
@@ -35,8 +36,8 @@ type bridge struct {
 // simply becomes the sync. A separate pair-then-exit step loses twice — the phone rolls
 // back a device that disconnects right after scanning, and the one-time history push that
 // follows pairing lands before any second process could take over.
-func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, pair bool, phone, qrFile string) error {
-	b := &bridge{ctx: ctx, cli: cli, store: store, media: newMediaPool(ctx, cli, store), loggedOut: make(chan struct{})}
+func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, archive string, pair bool, phone, qrFile string) error {
+	b := &bridge{ctx: ctx, cli: cli, store: store, archive: archive, media: newMediaPool(ctx, cli, store), loggedOut: make(chan struct{})}
 
 	// Manual mode delivers history blobs as notifications instead of downloading them
 	// behind our back, so ingest controls the timing and sees every payload. Set before

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -44,8 +46,15 @@ func (b *bridge) refreshProfilesOnce() error {
 	if err != nil {
 		return err
 	}
-	jids := make([]types.JID, 0, len(stored))
-	for _, raw := range stored {
+	archived, err := archiveAccounts(b.archive)
+	if err != nil {
+		return fmt.Errorf("reading the archive's accounts: %w", err)
+	}
+	accounts := slices.Concat(stored, archived)
+	slices.Sort(accounts)
+	accounts = slices.Compact(accounts)
+	jids := make([]types.JID, 0, len(accounts))
+	for _, raw := range accounts {
 		jid, err := types.ParseJID(raw)
 		if err != nil || jid.Server != types.DefaultUserServer {
 			continue
@@ -76,6 +85,36 @@ func (b *bridge) refreshProfilesOnce() error {
 	}
 	log.Printf("refreshed %d profile(s), fetched %d picture(s)", len(jids), pictures)
 	return nil
+}
+
+// archiveAccounts is every account the archive holds, most of which no message in this mirror
+// names: senders ingested from phone backups that predate the bridge.
+func archiveAccounts(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	db, err := sql.Open("sqlite3", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT profile_id FROM profiles")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jids []string
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err != nil {
+			return nil, err
+		}
+		jids = append(jids, jid)
+	}
+	return jids, rows.Err()
 }
 
 // picture returns the file just fetched, or "" when there was nothing new to fetch.

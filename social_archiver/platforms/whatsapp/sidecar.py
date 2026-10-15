@@ -51,7 +51,7 @@ async def run():
                 await asyncio.sleep(_FATAL_DELAY)
                 continue
 
-            args = [binary, "-store", str(config.BRIDGE_DIR)]
+            args = [binary, "-store", str(config.BRIDGE_DIR), "-archive", str(config.DATABASE_PATH)]
             if pairing:
                 # The same process pairs and then keeps running as the sync: a pair-then-exit
                 # handoff loses the link (the phone rolls back a device that disconnects

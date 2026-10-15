@@ -246,7 +246,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 		location.assign(`/login${query({ next: here })}`);
 	}
 	if (!response.ok) {
-		throw new ApiError(response.status, body?.detail ?? response.statusText);
+		// HTTP/2 carries no status text, and an empty message reads as no error at all
+		throw new ApiError(response.status, body?.detail ?? (response.statusText || `HTTP ${response.status}`));
 	}
 	// Control-plane endpoints report failures as {"error": "..."} with HTTP 200
 	if (body && typeof body === 'object' && 'error' in body && body.error) {
