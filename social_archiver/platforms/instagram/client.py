@@ -72,4 +72,5 @@ class InstagramClient:
         return self._authenticated
 
     def get_user_id_by_username(self, username: str) -> str:
-        return self.client.user_info_by_username(username).pk
+        # The plain lookup tries the logged-out web endpoint first, which 429s on every run.
+        return self.client.user_info_by_username_v1(username).pk
