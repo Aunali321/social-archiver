@@ -20,6 +20,8 @@ INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
 INSTAGRAM_DM_USERNAME = os.getenv("INSTAGRAM_DM_USERNAME")
 INSTAGRAM_SESSIONID = os.getenv("INSTAGRAM_SESSIONID")
 INSTAGRAM_DELAY_RANGE = [2, 5]
+# Likes and shared stop at the first fully archived page; this only bounds a catch-up after a long pause.
+INSTAGRAM_CATCHUP_LIMIT = int(os.getenv("INSTAGRAM_CATCHUP_LIMIT", "1000"))
 # (connect, read). instagrapi passes no timeout and requests has no default, so a host
 # that accepts the connection then goes quiet blocks until the process is killed.
 INSTAGRAM_REQUEST_TIMEOUT = (10, 30)

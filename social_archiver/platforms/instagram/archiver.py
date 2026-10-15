@@ -22,6 +22,10 @@ CATEGORIES = ("likes", "saved", "shared")
 # is; the other two walk a single feed and resume exactly.
 RESUMABLE = frozenset({"likes", "saved", "shared"})
 
+# Newest-first feeds, so a page with nothing new means everything past it is archived too.
+# `saved` walks collection by collection, where a known page only ends that collection.
+CHRONOLOGICAL = frozenset({"likes", "shared"})
+
 
 class ArchiveJob:
     """Fetches liked/saved/DM-shared posts, records them, and downloads media to
@@ -87,6 +91,7 @@ class ArchiveJob:
                 await self.db.add_collections(memberships)
 
             pending = []
+            recorded_before = recorded
             for media in page.media:
                 if media.pk in existing:
                     known += 1
@@ -104,6 +109,8 @@ class ArchiveJob:
             downloaded += await self._download_page(pending)
 
             logger.info(f"{category}: {recorded} new, {downloaded} downloaded, {known} already archived")
+            if not fetch_all and category in CHRONOLOGICAL and page.media and recorded == recorded_before:
+                break
 
         if resumable:
             await self.db.clear_cursor(PLATFORM, category)
@@ -122,7 +129,12 @@ class ArchiveJob:
         return sum(await asyncio.gather(*(download(item) for item in items)))
 
     def _fetch(self, category: str, fetch_all: bool, start_cursor: str = "") -> Iterator[MediaPage]:
-        amount = 0 if fetch_all else config.FETCH_BATCH_SIZE
+        if fetch_all:
+            amount = 0
+        elif category in CHRONOLOGICAL:
+            amount = config.INSTAGRAM_CATCHUP_LIMIT
+        else:
+            amount = config.FETCH_BATCH_SIZE
         match category:
             case "likes":
                 return self.likes.fetch_liked_media(amount, start_cursor)
