@@ -9,6 +9,8 @@ from typing import Self
 import aiosqlite
 
 from social_archiver.core import config, migrations
+from social_archiver.core.profile_store import ProfileStore
+from social_archiver.core.profiles import ProfileSnapshot
 from social_archiver.llm.vlm_types import VlmTrace
 
 MIGRATIONS = (
@@ -277,6 +279,126 @@ MIGRATIONS = (
         """,
         "INSERT INTO items_fts(items_fts) VALUES ('rebuild')",
     ),
+    # The people behind items (core/profiles.py). `author_id` becomes the link to a profile on
+    # every platform: Reddit never filled it, and its usernames can never change, so the name is
+    # the id. WhatsApp's own messages stay unlinked until the bridge names the account's jid.
+    # An unknown author was sometimes stored as '' rather than NULL; both mean no account.
+    # Instagram never recorded how an item came in, which on Instagram is its category, as
+    # WhatsApp's already is; an account's items are told apart by origin on every platform.
+    # Handle history is seeded from what items already recorded, in the order they were
+    # fetched: a handle is what the account was called when its post was archived, not when it
+    # was posted, so ordering by post date would interleave a rename. Names are not seeded:
+    # WhatsApp items carry this phone's name for a contact, falling back to the number, which
+    # would read as renames that never happened. A WhatsApp handle is the jid's number.
+    (
+        "UPDATE items SET author_id = NULL WHERE author_id = ''",
+        "UPDATE items SET origin = category WHERE platform = 'instagram' AND origin IS NULL",
+        "UPDATE items SET author_id = author_username "
+        "WHERE platform = 'reddit' AND author_id IS NULL AND author_username != '[deleted]'",
+        "CREATE INDEX IF NOT EXISTS idx_items_author_id ON items(author_id)",
+        """
+        CREATE TABLE profiles (
+                        profile_id TEXT PRIMARY KEY,
+                        platform TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        is_self INTEGER NOT NULL DEFAULT 0,
+                        followers INTEGER,
+                        following INTEGER,
+                        posts INTEGER,
+                        joined_at TIMESTAMP,
+                        first_seen TIMESTAMP NOT NULL,
+                        last_seen TIMESTAMP NOT NULL,
+                        observed_at TIMESTAMP
+                    )
+        """,
+        """
+        CREATE TABLE profile_versions (
+                        version_id INTEGER PRIMARY KEY,
+                        profile_id TEXT NOT NULL,
+                        handle TEXT NOT NULL,
+                        display_name TEXT,
+                        bio TEXT,
+                        location TEXT,
+                        website TEXT,
+                        verified INTEGER,
+                        private INTEGER,
+                        avatar_key TEXT,
+                        banner_key TEXT,
+                        first_seen TIMESTAMP NOT NULL,
+                        last_seen TIMESTAMP NOT NULL
+                    )
+        """,
+        "CREATE INDEX idx_profile_versions_profile ON profile_versions(profile_id, last_seen)",
+        "CREATE INDEX idx_profile_versions_handle ON profile_versions(handle COLLATE NOCASE)",
+        """
+        -- Keyed by the picture, not the version, so an avatar an account switches back to is
+                    -- one file. A source is a URL to fetch or a file the WhatsApp bridge already holds.
+                    CREATE TABLE profile_images (
+                        profile_id TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        source_url TEXT,
+                        source_file TEXT,
+                        path TEXT,
+                        error TEXT,
+                        PRIMARY KEY (profile_id, key)
+                    )
+        """,
+        """
+        INSERT INTO profile_versions (profile_id, handle, first_seen, last_seen)
+        WITH sightings AS (
+            SELECT author_id,
+                   CASE WHEN platform = 'whatsapp' THEN substr(author_id, 1, instr(author_id, '@') - 1)
+                        ELSE author_username END AS handle,
+                   COALESCE(fetched_at, datetime(created_at)) AS seen,
+                   rowid AS seq
+            FROM items WHERE author_id IS NOT NULL
+        ),
+        marked AS (
+            SELECT *, CASE WHEN handle IS lag(handle) OVER w THEN 0 ELSE 1 END AS starts
+            FROM sightings WINDOW w AS (PARTITION BY author_id ORDER BY seen, seq)
+        ),
+        runs AS (
+            SELECT *, sum(starts) OVER (PARTITION BY author_id ORDER BY seen, seq) AS run FROM marked
+        )
+        SELECT author_id, handle, min(seen), max(seen)
+        FROM runs GROUP BY author_id, run ORDER BY author_id, min(seen)
+        """,
+        """
+        INSERT INTO profiles (profile_id, platform, first_seen, last_seen)
+        SELECT profile_id, (SELECT platform FROM items LIMIT 1), min(first_seen), max(last_seen)
+        FROM profile_versions GROUP BY profile_id
+        """,
+        """
+        CREATE VIRTUAL TABLE profiles_fts USING fts5(
+                        handle, display_name, bio,
+                        content='profile_versions', content_rowid='version_id',
+                        tokenize='porter unicode61 remove_diacritics 2'
+                    )
+        """,
+        "INSERT INTO profiles_fts(profiles_fts) VALUES ('rebuild')",
+        """
+        CREATE TRIGGER profiles_fts_after_insert AFTER INSERT ON profile_versions BEGIN
+                        INSERT INTO profiles_fts(rowid, handle, display_name, bio)
+                        VALUES (new.version_id, new.handle, new.display_name, new.bio);
+                    END
+        """,
+        """
+        CREATE TRIGGER profiles_fts_after_delete AFTER DELETE ON profile_versions BEGIN
+                        INSERT INTO profiles_fts(profiles_fts, rowid, handle, display_name, bio)
+                        VALUES ('delete', old.version_id, old.handle, old.display_name, old.bio);
+                    END
+        """,
+        """
+        CREATE TRIGGER profiles_fts_after_update AFTER UPDATE OF handle, display_name, bio
+                    ON profile_versions BEGIN
+                        INSERT INTO profiles_fts(profiles_fts, rowid, handle, display_name, bio)
+                        VALUES ('delete', old.version_id, old.handle, old.display_name, old.bio);
+                        INSERT INTO profiles_fts(rowid, handle, display_name, bio)
+                        VALUES (new.version_id, new.handle, new.display_name, new.bio);
+                    END
+        """,
+    ),
 )
 
 
@@ -378,6 +500,10 @@ class Item:
     vlm_description: str | None = None
     caption_model: str | None = None
 
+    # Who posted it, as the payload that carried the item described them. Not a column: it is
+    # recorded into the profile tables by whichever write stores the item.
+    author_profile: ProfileSnapshot | None = field(default=None, metadata={"column": False})
+
     @classmethod
     def from_row(cls, row: aiosqlite.Row) -> Self:
         created_at = datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
@@ -450,7 +576,7 @@ class HeldItem:
         return cls(row["item_id"], row["text"], ArchiveStatus(row["archive_status"]))
 
 
-_ITEM_COLUMNS = [f.name for f in fields(Item)]
+_ITEM_COLUMNS = [f.name for f in fields(Item) if f.metadata.get("column", True)]
 
 # sqlite caps the host parameters one statement may carry. A lookup wider than this is split
 # across several statements rather than silently returning a short answer.
@@ -477,6 +603,7 @@ class Database:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self._connection: aiosqlite.Connection = None  # type: ignore
+        self.profiles: ProfileStore = None  # type: ignore
 
     async def connect(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -484,6 +611,13 @@ class Database:
         self._connection.row_factory = aiosqlite.Row
         await self._connection.execute("PRAGMA journal_mode=WAL")
         await migrations.apply(self._connection, MIGRATIONS, "archive", self.db_path)
+        self.profiles = ProfileStore(self._connection)
+
+    async def _observe_authors(self, items: Sequence[Item]):
+        for platform in {item.platform for item in items}:
+            await self.profiles.observe(
+                platform, (item.author_profile for item in items if item.platform == platform and item.author_profile)
+            )
 
     async def close(self):
         if self._connection:
@@ -549,6 +683,7 @@ class Database:
             (item.item_id, item.category),
         )
         await self._connection.commit()
+        await self._observe_authors([item])
 
     async def insert_many(self, items: Sequence[Item]):
         """The whole batch in one transaction. `insert` commits per row, which is what an
@@ -567,6 +702,7 @@ class Database:
             [(item.item_id, item.category) for item in items],
         )
         await self._connection.commit()
+        await self._observe_authors(items)
 
     async def add_categories(self, pairs: Iterable[tuple[str, str]]):
         """Record category membership for items that already exist, which is how an item
@@ -638,7 +774,7 @@ class Database:
         cursor = await self._connection.executemany(
             """
             UPDATE items
-            SET text = ?, author_username = ?, created_at = COALESCE(created_at, ?),
+            SET text = ?, author_username = ?, author_id = COALESCE(?, author_id), created_at = COALESCE(created_at, ?),
                 media_urls = ?, media_types = ?, media_count = ?, has_media = ?,
                 link_url = COALESCE(link_url, ?),
                 archive_status = CASE
@@ -655,6 +791,7 @@ class Database:
                 (
                     item.text,
                     item.author_username,
+                    item.author_id,
                     _to_column(item, "created_at"),
                     _to_column(item, "media_urls"),
                     _to_column(item, "media_types"),
@@ -669,6 +806,7 @@ class Database:
             ],
         )
         await self._connection.commit()
+        await self._observe_authors(items)
         return cursor.rowcount
 
     async def ids_by_origin(self, platform: str, origin: str) -> set[str]:
@@ -906,6 +1044,7 @@ class Database:
             [_to_column(item, name) for name in columns] + [item.item_id],
         )
         await self._connection.commit()
+        await self._observe_authors([item])
         return cursor.rowcount > 0
 
     async def set_tombstone_reason(self, item_id: str, reason: str) -> bool:

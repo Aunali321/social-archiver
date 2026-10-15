@@ -256,7 +256,7 @@
 
 					<!-- Run now -->
 					<div class="mt-3 flex flex-wrap gap-2 border-t border-outline-variant pt-3">
-						{#each ['archive', 'upload', 'caption', 'embed'] as job (job)}
+						{#each ['archive', 'profiles', 'upload', 'caption', 'embed'] as job (job)}
 							<Button variant="text" onclick={() => act(() => api.run({ platform: p.platform, job }))}>
 								{job}
 							</Button>

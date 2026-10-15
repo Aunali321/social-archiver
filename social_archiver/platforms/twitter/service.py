@@ -5,6 +5,8 @@ import logging
 from social_archiver.core.database import Database
 from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
 from social_archiver.core.milvus_manager import MilvusManager
+from social_archiver.core.profile_images import download_profile_images
+from social_archiver.core.profile_refresh import refresh_profiles
 from social_archiver.core.sources import SourceJob, SourceRef
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.llm.factory import create_vlm_client
@@ -14,6 +16,7 @@ from social_archiver.platforms.twitter.client import TwitterClient
 from social_archiver.core.caption import CaptionJob
 from social_archiver.core.embed import IndexJob
 from social_archiver.platforms.twitter.port import TwitterPort
+from social_archiver.platforms.twitter.profile_refresh import TweetAuthorReader
 from social_archiver.platforms.twitter.sources import TwitterSourceFetcher
 
 logger = logging.getLogger(__name__)
@@ -53,6 +56,20 @@ async def source(target: str, kind: str = "profile", full: bool = False, no_medi
         await tw_client.close()
 
 
+async def profiles(retry_failed: bool = False):
+    config.validate_archive()
+    tw_client = TwitterClient()
+    try:
+        if not await tw_client.verify_credentials():
+            raise RuntimeError("Twitter credential verification failed")
+        async with Database(config.DATABASE_PATH) as db:
+            await db.profiles.mark_self(tw_client.client_user_id)
+            await refresh_profiles(db, TweetAuthorReader(tw_client))
+            await download_profile_images(db, PORT.platform, retry_failed)
+    finally:
+        await tw_client.close()
+
+
 async def upload(retry_failed: bool = False):
     config.validate_upload()
     async with Database(config.DATABASE_PATH) as db:
@@ -82,7 +99,7 @@ async def embed(retry_failed: bool = False):
 
 
 async def run_all(fetch_all: bool = False):
-    jobs = {"archive": lambda: archive(fetch_all)}
+    jobs = {"archive": lambda: archive(fetch_all), "profiles": profiles}
     # Uploading, captioning and indexing are opt-in: without a bot token, or with
     # their stages disabled, there is nothing for them to do, and archiving does
     # not depend on any of them.

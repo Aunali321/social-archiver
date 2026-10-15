@@ -1,7 +1,7 @@
 """Read-only query layer over the per-platform archives — see store.ArchiveReader."""
 
 from social_archiver.read.models import (
-    AuthorCount,
+    AuthorRef,
     ChatSummary,
     Facets,
     ItemFilters,
@@ -14,7 +14,7 @@ from social_archiver.read.store import ArchiveReader
 
 __all__ = [
     "ArchiveReader",
-    "AuthorCount",
+    "AuthorRef",
     "ChatSummary",
     "Facets",
     "ItemFilters",

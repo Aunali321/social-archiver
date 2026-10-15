@@ -13,7 +13,7 @@ from asyncpraw.models import Comment, Submission
 
 from social_archiver.core.downloader import is_direct_media
 from social_archiver.platforms.reddit import config
-from social_archiver.platforms.reddit.simple_post import RedditItem, RedditMedia
+from social_archiver.platforms.reddit.simple_post import DELETED_AUTHOR, RedditItem, RedditMedia
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def _parse_submission(s: Submission) -> RedditItem:
     return RedditItem(
         fullname=s.fullname,
         kind="post",
-        author=str(s.author) if s.author else "[deleted]",
+        author=str(s.author) if s.author else DELETED_AUTHOR,
         subreddit=str(s.subreddit),
         permalink=f"https://reddit.com{s.permalink}",
         created_at=datetime.fromtimestamp(s.created_utc, tz=timezone.utc),
@@ -108,7 +108,7 @@ def _parse_comment(c: Comment) -> RedditItem:
     return RedditItem(
         fullname=c.fullname,
         kind="comment",
-        author=str(c.author) if c.author else "[deleted]",
+        author=str(c.author) if c.author else DELETED_AUTHOR,
         subreddit=subreddit,
         permalink=f"https://reddit.com/r/{subreddit}/comments/{c.link_id[3:]}/_/{c.id}/",
         created_at=datetime.fromtimestamp(c.created_utc, tz=timezone.utc),

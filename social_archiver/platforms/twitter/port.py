@@ -49,6 +49,9 @@ class TwitterPort:
 
         return "\n".join(lines)
 
+    def profile_url(self, handle: str) -> str:
+        return f"https://x.com/{handle}"
+
     def downloads_folder(self, item: Item) -> Path:
         return config.DOWNLOADS_DIR / PLATFORM / item.category
 

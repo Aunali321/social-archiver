@@ -17,7 +17,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.authentication import AuthenticationMiddleware
 
 from social_archiver import mcp_server
-from social_archiver.api import auth, content, control, frontend
+from social_archiver.api import auth, content, control, frontend, profiles
 from social_archiver.core import config
 from social_archiver.core.worker import running
 
@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
     signed_in = [Depends(auth.require_session)]
     app.include_router(control.router, dependencies=signed_in)
     app.include_router(content.router, dependencies=signed_in)
+    app.include_router(profiles.router, dependencies=signed_in)
     app.include_router(content.public_router)
     app.router.routes.extend(mcp_app.routes)
     app.include_router(frontend.router)

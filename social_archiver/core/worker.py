@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 # Which flags each job accepts, mirroring core.cli.build_parser
 JOB_FLAGS = {
     "archive": ("category", "history", "retry_failed"),
+    # Describes the accounts behind archived items and fetches their pictures
+    "profiles": ("retry_failed",),
     "upload": ("retry_failed",),
     "caption": ("retry_failed",),
     "embed": ("retry_failed",),
@@ -87,6 +89,9 @@ async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> lis
     # Tracked sources sync on the same tick, before uploading, so a cycle's uploads carry
     # everything it archived rather than leaving source items until the next one.
     plan += [("source", None, tracked.target) for tracked in await queue.sources(schedule.platform) if tracked.enabled]
+    # After everything that records items, whose authors it describes, and soon after: some
+    # platforms' picture links expire within days.
+    plan.append(("profiles", None, None))
     if config.TELEGRAM_BOT_TOKEN:
         plan.append(("upload", None, None))
     # Caption before index: indexing reads captions, so it must follow.

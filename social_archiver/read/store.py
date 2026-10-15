@@ -25,7 +25,6 @@ from social_archiver.read.models import (
     MEDIA_TYPES,
     PRODUCT_TYPES,
     SEED_ORIGINS,
-    AuthorCount,
     ChatSummary,
     Facets,
     ItemFilters,
@@ -133,6 +132,10 @@ class ArchiveReader:
         self._archives[platform] = _Archive(platform, connection, columns, tables, select, "items_fts" in tables)
         return self._archives[platform]
 
+    async def connection(self, platform: str) -> aiosqlite.Connection | None:
+        archive = await self._archive(platform)
+        return archive.connection if archive else None
+
     async def present(self) -> list[str]:
         return [p for p in self.platforms if await self._archive(p) is not None]
 
@@ -161,7 +164,14 @@ class ArchiveReader:
             else:
                 add(f"{p}category = ?", filters.category)
         if filters.author:
-            add(f"{p}author_username = ? COLLATE NOCASE", filters.author)
+            add(
+                f"{p}author_id IN (SELECT profile_id FROM profile_versions "
+                "WHERE handle = ? COLLATE NOCASE OR display_name = ? COLLATE NOCASE)",
+                filters.author,
+                filters.author,
+            )
+        if filters.author_id:
+            add(f"{p}author_id = ?", filters.author_id)
         if filters.subreddit:
             add(f"{p}subreddit = ?", filters.subreddit)
         if filters.chat:
@@ -494,18 +504,6 @@ class ArchiveReader:
             for row in rows
         ]
 
-    async def authors(self, platform: str, prefix: str = "", limit: int = 20) -> list[AuthorCount]:
-        archive = await self._archive(platform)
-        if archive is None:
-            return []
-        pattern = re.sub(r"([%_\\])", r"\\\1", prefix) + "%"
-        rows = await archive.connection.execute_fetchall(
-            "SELECT author_username, count(*) AS n FROM items WHERE author_username LIKE ? ESCAPE '\\' "
-            "GROUP BY author_username ORDER BY n DESC LIMIT ?",
-            (pattern, limit),
-        )
-        return [AuthorCount(row["author_username"], row["n"]) for row in rows]
-
     async def facets(self, platform: str) -> Facets:
         archive = await self._archive(platform)
         if archive is None:
@@ -538,7 +536,7 @@ class ArchiveReader:
 
         totals = await one(
             "SELECT count(*) AS total, sum(has_media) AS media, "
-            "sum(local_paths IS NOT NULL) AS held, count(DISTINCT author_username) AS authors, "
+            "sum(local_paths IS NOT NULL) AS held, (SELECT count(*) FROM profiles) AS authors, "
             "min(created_at) AS oldest, max(created_at) AS newest FROM items"
         )
         stats.total = totals["total"]

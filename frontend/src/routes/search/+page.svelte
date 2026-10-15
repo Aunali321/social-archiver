@@ -16,6 +16,14 @@
 	import ItemCard from '$lib/components/ItemCard.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import PeopleResults from '$lib/components/PeopleResults.svelte';
+	import Tabs from '$lib/components/Tabs.svelte';
+
+	type Tab = 'posts' | 'people';
+	const TABS: { value: Tab; label: string }[] = [
+		{ value: 'posts', label: 'Posts' },
+		{ value: 'people', label: 'People' }
+	];
 
 	const SORTS: { value: SearchSort; label: string }[] = [
 		{ value: 'relevance', label: 'Most relevant' },
@@ -54,6 +62,7 @@
 	let semanticPlatforms: string[] = $state([]);
 	let facets: Record<string, Facets> = $state({});
 
+	let tab = $state<Tab>(initial.get('tab') === 'people' ? 'people' : 'posts');
 	let query = $state(initial.get('q') ?? '');
 	let semantic = $state(initial.has('semantic'));
 	let sort = $state<SearchSort>((initial.get('sort') as SearchSort | null) ?? 'relevance');
@@ -106,6 +115,12 @@
 	/** The URL holds the search, so returning from an item lands on the same results. */
 	function submit() {
 		const q = query.trim();
+		if (tab === 'people') {
+			const params = new URLSearchParams({ tab });
+			if (q) params.set('q', q);
+			goto(`?${params}`, { replaceState: true, keepFocus: true, noScroll: true });
+			return;
+		}
 		if (!q) return;
 		const params = new URLSearchParams({ q });
 		if (semantic) params.set('semantic', '1');
@@ -126,7 +141,7 @@
 			semanticPlatforms = r.semantic;
 		});
 		api.facets().then((r) => (facets = r));
-		search();
+		if (tab === 'posts') search();
 	});
 </script>
 
@@ -138,12 +153,25 @@
 	<aside class="hidden xl:block">
 		<div class="sticky top-6">
 			<h1 class="mb-5 text-headline text-on-surface">Search</h1>
-			<FilterPanel variant="panel" {platforms} {facets} {filters} onchange={refine} />
+			{#if tab === 'posts'}
+				<FilterPanel variant="panel" {platforms} {facets} {filters} onchange={refine} />
+			{/if}
 		</div>
 	</aside>
 
 	<div class="min-w-0">
 		<h1 class="mb-4 text-headline text-on-surface xl:hidden">Search</h1>
+		<div class="mb-4">
+			<Tabs
+				tabs={TABS}
+				value={tab}
+				label="What to search"
+				onchange={(next) => {
+					tab = next;
+					submit();
+				}}
+			/>
+		</div>
 
 		<form
 			onsubmit={(event) => {
@@ -151,101 +179,110 @@
 				submit();
 			}}
 		>
-			<TextField label="Search the archive" bind:value={query} type="search" autofocus>
+			<TextField
+				label={tab === 'people' ? 'Search people' : 'Search the archive'}
+				bind:value={query}
+				type="search"
+				autofocus
+			>
 				{#snippet leading()}<SearchIcon size={20} />{/snippet}
 			</TextField>
 		</form>
 
-		<div class="mt-3 xl:hidden">
-			<FilterPanel variant="row" {platforms} {facets} {filters} onchange={refine} />
-		</div>
+		{#if tab === 'people'}
+			<div class="mt-3"><PeopleResults {query} {platforms} /></div>
+		{:else}
+			<div class="mt-3 xl:hidden">
+				<FilterPanel variant="row" {platforms} {facets} {filters} onchange={refine} />
+			</div>
 
-		<div class="mt-3 flex flex-wrap items-center gap-2">
-			{#if semanticPlatforms.length}
-				<Chip
-					selected={semantic}
-					onclick={() => {
-						semantic = !semantic;
-						refine();
-					}}
-				>
-					<Sparkles size={14} /> Semantic
-				</Chip>
-			{/if}
-			{#if !semantic}
-				<Select label="Sort" bind:value={sort} options={SORTS} onchange={refine} />
-				<Select
-					label="Match in"
-					bind:value={match}
-					allLabel="Anywhere"
-					options={MATCHES}
-					onchange={refine}
-				/>
-			{/if}
-			{#if hits.length}
-				<p class="ml-auto text-label text-on-surface-variant">
-					{hits.length}{more ? '+' : ''} results
-				</p>
-			{/if}
-		</div>
-
-		<div class="mt-4">
-			{#if error}
-				<EmptyState title="Search failed" detail={error} error>
-					{#snippet icon()}<CircleAlert size={28} />{/snippet}
-				</EmptyState>
-			{:else if loading && hits.length === 0}
-				<div class="flex flex-col gap-3">
-					{#each Array(4), i (i)}
-						<div class="rounded-md bg-surface-container-low p-4">
-							<Skeleton class="h-3.5 w-44" />
-							<Skeleton class="mt-3 h-3.5 w-full" />
-							<Skeleton class="mt-2 h-3.5 w-1/2" />
-						</div>
-					{/each}
-				</div>
-			{:else if searched && hits.length === 0}
-				<EmptyState title="No matches" detail="Nothing in the archive matches that query and these filters.">
-					{#snippet icon()}<SearchX size={28} />{/snippet}
-				</EmptyState>
-			{:else if hits.length}
-				<div class="flex flex-col gap-3">
-					{#each hits as hit (hit.item.platform + hit.item.item_id)}
-						<ItemCard item={hit.item} snippet={hit.snippet} mediaSnippet={hit.media_snippet} />
-					{/each}
-				</div>
-				{#if more}
-					<div class="flex justify-center py-6">
-						<Button
-							variant="tonal"
-							disabled={loading}
-							onclick={() => {
-								offset += PAGE;
-								search(true);
-							}}
-						>
-							{loading ? 'Loading…' : 'More results'}
-						</Button>
-					</div>
+			<div class="mt-3 flex flex-wrap items-center gap-2">
+				{#if semanticPlatforms.length}
+					<Chip
+						selected={semantic}
+						onclick={() => {
+							semantic = !semantic;
+							refine();
+						}}
+					>
+						<Sparkles size={14} /> Semantic
+					</Chip>
 				{/if}
-			{:else}
-				<EmptyState
-					title="Search everything you've archived"
-					detail={'Posts, captions, chat messages and media descriptions.' +
-						(semanticPlatforms.length ? ' Toggle Semantic for meaning-based search.' : '')}
-				>
-					{#snippet icon()}<SearchIcon size={28} />{/snippet}
-				</EmptyState>
-				<section aria-labelledby="tips" class="mx-auto mt-2 max-w-xl rounded-md bg-surface-container-low p-4">
-					<h2 id="tips" class="mb-3 text-title text-on-surface">Search operators</h2>
-					<dl class="grid grid-cols-1 gap-x-4 gap-y-2 text-body sm:grid-cols-[auto_1fr]">
-						{#each TIPS as [example, meaning] (example)}
-							<dt><code class="text-label-lg text-primary">{example}</code></dt>
-							<dd class="mb-1 text-on-surface-variant sm:mb-0">{meaning}</dd>
+				{#if !semantic}
+					<Select label="Sort" bind:value={sort} options={SORTS} onchange={refine} />
+					<Select
+						label="Match in"
+						bind:value={match}
+						allLabel="Anywhere"
+						options={MATCHES}
+						onchange={refine}
+					/>
+				{/if}
+				{#if hits.length}
+					<p class="ml-auto text-label text-on-surface-variant">
+						{hits.length}{more ? '+' : ''} results
+					</p>
+				{/if}
+			</div>
+
+			<div class="mt-4">
+				{#if error}
+					<EmptyState title="Search failed" detail={error} error>
+						{#snippet icon()}<CircleAlert size={28} />{/snippet}
+					</EmptyState>
+				{:else if loading && hits.length === 0}
+					<div class="flex flex-col gap-3">
+						{#each Array(4), i (i)}
+							<div class="rounded-md bg-surface-container-low p-4">
+								<Skeleton class="h-3.5 w-44" />
+								<Skeleton class="mt-3 h-3.5 w-full" />
+								<Skeleton class="mt-2 h-3.5 w-1/2" />
+							</div>
 						{/each}
-					</dl>
-				</section>
-			{/if}
-		</div>
+					</div>
+				{:else if searched && hits.length === 0}
+					<EmptyState title="No matches" detail="Nothing in the archive matches that query and these filters.">
+						{#snippet icon()}<SearchX size={28} />{/snippet}
+					</EmptyState>
+				{:else if hits.length}
+					<div class="flex flex-col gap-3">
+						{#each hits as hit (hit.item.platform + hit.item.item_id)}
+							<ItemCard item={hit.item} snippet={hit.snippet} mediaSnippet={hit.media_snippet} />
+						{/each}
+					</div>
+					{#if more}
+						<div class="flex justify-center py-6">
+							<Button
+								variant="tonal"
+								disabled={loading}
+								onclick={() => {
+									offset += PAGE;
+									search(true);
+								}}
+							>
+								{loading ? 'Loading…' : 'More results'}
+							</Button>
+						</div>
+					{/if}
+				{:else}
+					<EmptyState
+						title="Search everything you've archived"
+						detail={'Posts, captions, chat messages and media descriptions.' +
+							(semanticPlatforms.length ? ' Toggle Semantic for meaning-based search.' : '')}
+					>
+						{#snippet icon()}<SearchIcon size={28} />{/snippet}
+					</EmptyState>
+					<section aria-labelledby="tips" class="mx-auto mt-2 max-w-xl rounded-md bg-surface-container-low p-4">
+						<h2 id="tips" class="mb-3 text-title text-on-surface">Search operators</h2>
+						<dl class="grid grid-cols-1 gap-x-4 gap-y-2 text-body sm:grid-cols-[auto_1fr]">
+							{#each TIPS as [example, meaning] (example)}
+								<dt><code class="text-label-lg text-primary">{example}</code></dt>
+								<dd class="mb-1 text-on-surface-variant sm:mb-0">{meaning}</dd>
+							{/each}
+						</dl>
+					</section>
+				{/if}
+			</div>
+		{/if}
 	</div>
 </div>

@@ -6,12 +6,60 @@ export interface MediaRef {
 	available: boolean;
 }
 
+/** Who posted an item, as the account shows today. `profile_id` is null where no account
+ * stands behind the item: deleted, or never named by what the archive was given. */
+export interface Author {
+	platform: string;
+	profile_id: string | null;
+	handle: string;
+	display_name: string | null;
+	verified: boolean;
+	is_self: boolean;
+	avatar_url: string | null;
+}
+
+export interface ProfileHit {
+	author: Author;
+	bio: string | null;
+	items: number;
+}
+
+export interface ProfileVersion {
+	handle: string;
+	display_name: string | null;
+	bio: string | null;
+	location: string | null;
+	website: string | null;
+	verified: boolean | null;
+	private: boolean | null;
+	avatar_url: string | null;
+	banner_url: string | null;
+	first_seen: string;
+	last_seen: string;
+}
+
+export interface Profile {
+	platform: string;
+	profile_id: string;
+	url: string;
+	status: 'active' | 'suspended' | 'deleted';
+	is_self: boolean;
+	followers: number | null;
+	following: number | null;
+	posts: number | null;
+	joined_at: string | null;
+	first_seen: string;
+	last_seen: string;
+	observed_at: string | null;
+	versions: ProfileVersion[]; // newest first; the first is the account as it is now
+	encounters: { total: number; origins: Record<string, number>; first: string | null; last: string | null };
+}
+
 export interface Item {
 	item_id: string;
 	platform: string;
 	category: string;
-	author_username: string;
-	author_id: string | null;
+	author: Author;
 	post_url: string;
 	text: string | null;
 	title: string | null;
@@ -227,6 +275,7 @@ export interface ItemFilters {
 	seeds_only?: boolean;
 	category?: string;
 	author?: string;
+	author_id?: string;
 	subreddit?: string;
 	chat?: string;
 	collection?: string;
@@ -288,10 +337,10 @@ export const api = {
 	chats: (platform: string) => request<Chat[]>(`/api/chats/${platform}`),
 	facets: () => request<Record<string, Facets>>('/api/facets'),
 	stats: () => request<ArchiveStats[]>('/api/archive/stats'),
-	authors: (platforms: string | undefined, prefix: string) =>
-		request<{ author: string; items: number }[]>(
-			`/api/authors${query({ platforms, prefix, limit: 8 })}`
-		),
+	profiles: (q: string, platforms?: string, limit = 20) =>
+		request<ProfileHit[]>(`/api/profiles${query({ q, platforms, limit })}`),
+	profile: (platform: string, id: string) =>
+		request<Profile>(`/api/profiles/${platform}/${encodeURIComponent(id)}`),
 	recoverMedia: (platform: string, id: string) =>
 		request<Item>(`/api/items/${platform}/${encodeURIComponent(id)}/recover-media`, {
 			method: 'POST'

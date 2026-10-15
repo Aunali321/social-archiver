@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { displayName } from '$lib/format';
 	import Repeat2 from '@lucide/svelte/icons/repeat-2';
 	import ItemText from '../ItemText.svelte';
 	import ContextCard from '../ContextCard.svelte';
@@ -24,7 +25,7 @@
 
 {#if item.is_retweet && retweeted}
 	<p class="mb-1 inline-flex items-center gap-1.5 text-label text-on-surface-variant">
-		<Repeat2 size={13} /> retweeted {retweeted.author_username}
+		<Repeat2 size={13} /> retweeted {displayName(retweeted.author)}
 	</p>
 	<ContextCard item={retweeted} />
 {/if}

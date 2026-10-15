@@ -40,6 +40,9 @@ class InstagramPort:
 
         return "\n".join(lines)
 
+    def profile_url(self, handle: str) -> str:
+        return f"https://instagram.com/{handle}"
+
     def downloads_folder(self, item: Item) -> Path:
         folder = config.DOWNLOADS_DIR / PLATFORM / item.category
         if item.category == "saved" and item.collection_name:

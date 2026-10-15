@@ -19,6 +19,11 @@ def build_parser(
         "--retry-failed", action="store_true", help="Also retry items whose media download previously failed"
     )
 
+    profiles = commands.add_parser("profiles", help="Describe the accounts behind archived items and fetch their pictures")
+    profiles.add_argument(
+        "--retry-failed", action="store_true", help="Also retry pictures whose download previously failed"
+    )
+
     upload = commands.add_parser("upload", help="Send archived items to their Telegram channels")
     upload.add_argument("--retry-failed", action="store_true", help="Also retry items whose upload previously failed")
 

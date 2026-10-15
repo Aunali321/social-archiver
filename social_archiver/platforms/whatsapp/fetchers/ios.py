@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Self
 
 from social_archiver.core.config import ConfigError
-from social_archiver.platforms.whatsapp.simple_message import WhatsAppMedia, WhatsAppMessage
+from social_archiver.platforms.whatsapp.simple_message import OWN_SENDER, WhatsAppMedia, WhatsAppMessage
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ class IOSStore:
             chat_jid=chat_jid,
             msg_id=row["stanza_id"],
             kind="group" if group else "dm",
-            sender="me" if row["from_me"] else _display(sender_jid, names),
+            sender=OWN_SENDER if row["from_me"] else _display(sender_jid, names),
             sender_jid=None if row["from_me"] else sender_jid,
             # For a group the partner name is the group subject; for a DM it can be the bare
             # number, so the contact goes through the same preference the sender does

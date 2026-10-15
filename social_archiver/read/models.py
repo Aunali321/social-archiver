@@ -9,6 +9,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from social_archiver.core.database import Item
+from social_archiver.core.profiles import ProfileStatus
 
 # The engine's per-platform seed sets (platforms/*/port.py), plus liked_reply: the expander
 # files a reply found through the likes check under its own origin, but the user did like it.
@@ -84,7 +85,8 @@ class ItemFilters:
 
     platforms: tuple[str, ...] = ()
     category: str | None = None
-    author: str | None = None
+    author: str | None = None  # any handle or name the account has gone by
+    author_id: str | None = None  # one account, by the platform's id for it
     subreddit: str | None = None
     chat: str | None = None  # conversation_id: a WhatsApp chat JID or a Reddit submission
     collection: str | None = None
@@ -149,9 +151,70 @@ class ChatSummary:
 
 
 @dataclass(slots=True)
-class AuthorCount:
-    author: str
-    items: int
+class AuthorRef:
+    """An account as an item shows it: who it is now, whatever it was called when archived."""
+
+    platform: str
+    profile_id: str
+    handle: str
+    display_name: str | None
+    verified: bool
+    is_self: bool
+    avatar: int | None  # the fetched picture's id; None until fetched, or when it has none
+
+
+@dataclass(slots=True)
+class ProfileVersion:
+    handle: str
+    display_name: str | None
+    bio: str | None
+    location: str | None
+    website: str | None
+    verified: bool | None
+    private: bool | None
+    avatar: int | None
+    banner: int | None
+    first_seen: datetime
+    last_seen: datetime
+
+
+@dataclass(slots=True)
+class Encounters:
+    """How the archive came to hold an account's items: what the user did with them, by
+    origin, and how much was pulled in only as context around something else."""
+
+    total: int = 0
+    origins: dict[str, int] = field(default_factory=dict)
+    first: datetime | None = None
+    last: datetime | None = None
+
+
+@dataclass(slots=True)
+class Profile:
+    platform: str
+    profile_id: str
+    status: ProfileStatus
+    is_self: bool
+    followers: int | None
+    following: int | None
+    posts: int | None
+    joined_at: datetime | None
+    first_seen: datetime
+    last_seen: datetime
+    observed_at: datetime | None  # None until a live payload described the account
+    versions: list[ProfileVersion]  # newest first
+    encounters: Encounters
+
+    @property
+    def current(self) -> ProfileVersion:
+        return self.versions[0]
+
+
+@dataclass(slots=True)
+class ProfileHit:
+    author: AuthorRef
+    bio: str | None
+    items: int  # archived items by the account
 
 
 @dataclass(slots=True)

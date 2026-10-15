@@ -1,66 +1,19 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import Inbox from '@lucide/svelte/icons/inbox';
-	import CircleAlert from '@lucide/svelte/icons/circle-alert';
-	import { api, type Facets, type Item } from '$lib/api';
+	import { api, type Facets } from '$lib/api';
 	import { Filters } from '$lib/filters.svelte';
 	import FilterPanel from '$lib/components/FilterPanel.svelte';
-	import ItemCard from '$lib/components/ItemCard.svelte';
-	import Skeleton from '$lib/components/Skeleton.svelte';
-	import EmptyState from '$lib/components/EmptyState.svelte';
+	import ItemFeed from '$lib/components/ItemFeed.svelte';
 
 	let platforms: string[] = $state([]);
 	let facets: Record<string, Facets> = $state({});
 	const filters = new Filters();
-
-	let items: Item[] = $state([]);
-	let cursor: string | null = $state(null);
-	let exhausted = $state(false);
-	let loading = $state(false);
-	let error = $state<string | null>(null);
-	let generation = 0;
-
-	async function reload() {
-		const mine = ++generation;
-		items = [];
-		cursor = null;
-		exhausted = false;
-		error = null;
-		await loadMore(mine);
-	}
-
-	async function loadMore(mine = generation) {
-		if (loading || exhausted) return;
-		loading = true;
-		try {
-			const page = await api.items(filters.query, cursor);
-			if (mine !== generation) return;
-			items.push(...page.items);
-			cursor = page.next_cursor;
-			exhausted = page.next_cursor == null;
-		} catch (e) {
-			if (mine === generation) error = e instanceof Error ? e.message : String(e);
-		} finally {
-			if (mine === generation) loading = false;
-		}
-	}
+	let generation = $state(0);
 
 	onMount(() => {
 		api.platforms().then((r) => (platforms = r.platforms));
 		api.facets().then((r) => (facets = r));
-		reload();
 	});
-
-	function sentinel(node: HTMLElement) {
-		const observer = new IntersectionObserver(
-			(entries) => {
-				if (entries[0].isIntersecting) loadMore();
-			},
-			{ rootMargin: '800px' }
-		);
-		observer.observe(node);
-		return { destroy: () => observer.disconnect() };
-	}
 </script>
 
 <svelte:head><title>Timeline · Archive</title></svelte:head>
@@ -70,7 +23,7 @@
 	<aside class="hidden xl:block">
 		<div class="sticky top-6">
 			<h1 class="mb-5 text-headline text-on-surface">Timeline</h1>
-			<FilterPanel variant="panel" {platforms} {facets} {filters} onchange={reload} />
+			<FilterPanel variant="panel" {platforms} {facets} {filters} onchange={() => generation++} />
 		</div>
 	</aside>
 
@@ -78,50 +31,16 @@
 		<div class="xl:hidden">
 			<h1 class="mb-4 text-headline text-on-surface">Timeline</h1>
 			<div class="mb-4">
-				<FilterPanel variant="row" {platforms} {facets} {filters} onchange={reload} />
+				<FilterPanel variant="row" {platforms} {facets} {filters} onchange={() => generation++} />
 			</div>
 		</div>
 
-		{#if error}
-			<EmptyState title="Couldn't load the timeline" detail={error} error>
-				{#snippet icon()}<CircleAlert size={28} />{/snippet}
-			</EmptyState>
-		{:else if items.length === 0 && loading}
-			<div class="flex flex-col gap-2">
-				{#each Array(6), i (i)}
-					<div class="rounded-md bg-surface-container-low px-4 py-3">
-						<div class="flex items-center gap-3">
-							<Skeleton class="size-7 rounded-full" />
-							<div class="flex-1"><Skeleton class="h-3.5 w-40" /></div>
-							<Skeleton class="h-3 w-12" />
-						</div>
-						<Skeleton class="mt-3 h-3.5 w-full" />
-						<Skeleton class="mt-2 h-3.5 w-2/3" />
-					</div>
-				{/each}
-			</div>
-		{:else if items.length === 0}
-			<EmptyState
-				title="Nothing here"
-				detail="No archived items match these filters. The archive fills as the workers run."
-			>
-				{#snippet icon()}<Inbox size={28} />{/snippet}
-			</EmptyState>
-		{:else}
-			<div class="flex flex-col gap-2">
-				{#each items as item (item.platform + item.item_id)}
-					<ItemCard {item} />
-				{/each}
-			</div>
-			{#if !exhausted}
-				<div use:sentinel class="flex justify-center py-6">
-					<Skeleton class="h-3 w-24" />
-				</div>
-			{:else}
-				<p class="py-8 text-center text-label text-on-surface-variant">
-					{items.length.toLocaleString()} items — end of the archive
-				</p>
-			{/if}
-		{/if}
+		{#key generation}
+			<ItemFeed
+				load={(cursor) => api.items(filters.query, cursor)}
+				errorTitle="Couldn't load the timeline"
+				emptyDetail="No archived items match these filters. The archive fills as the workers run."
+			/>
+		{/key}
 	</div>
 </div>

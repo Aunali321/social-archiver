@@ -9,11 +9,18 @@ already downloaded by the bridge into its own media/ folder, so rows point at lo
 import logging
 import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Self
 
-from social_archiver.platforms.whatsapp.simple_message import WhatsAppMedia, WhatsAppMessage
+from social_archiver.core.profiles import ImageRef, ProfileSnapshot
+from social_archiver.platforms.whatsapp.simple_message import (
+    OWN_SENDER,
+    WhatsAppMedia,
+    WhatsAppMessage,
+    author_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +69,43 @@ class BridgeStore:
         return cls(database) if database.exists() else None
 
     async def walk(self) -> AsyncIterator[list[WhatsAppMessage]]:
-        connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True)
-        connection.row_factory = sqlite3.Row
+        connection = self._connect()
         try:
             cursor = connection.execute(_QUERY)
             while rows := cursor.fetchmany(BATCH):
                 yield [self._message(row) for row in rows]
         finally:
             connection.close()
+
+    def account(self) -> str | None:
+        """The paired account's jid; None until the bridge has connected once since recording it."""
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT jid FROM account").fetchone()
+        return row["jid"] if row else None
+
+    def profiles(self) -> list[ProfileSnapshot]:
+        """What each account shows about itself, as the bridge last refreshed it."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT profiles.jid AS jid, contacts.name AS name, profiles.about AS about,
+                       profiles.picture_id AS picture_id, profiles.picture_path AS picture_path
+                FROM profiles LEFT JOIN contacts ON contacts.jid = profiles.jid
+                """
+            ).fetchall()
+        return [self._profile(row) for row in rows]
+
+    def _profile(self, row: sqlite3.Row) -> ProfileSnapshot:
+        snapshot = author_snapshot(row["jid"], row["name"])
+        snapshot.bio = row["about"]
+        if row["picture_path"]:
+            snapshot.avatar = ImageRef(row["picture_id"], Path(row["picture_path"]))
+        return snapshot
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(f"file:{self.database}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        return connection
 
     def _message(self, row: sqlite3.Row) -> WhatsAppMessage:
         chat_jid = row["chat_jid"]
@@ -78,8 +114,10 @@ class BridgeStore:
             chat_jid=chat_jid,
             msg_id=row["msg_id"],
             kind="group" if group else "dm",
-            sender="me" if row["from_me"] else (row["sender_name"] or (row["sender_jid"] or "").partition("@")[0]),
-            sender_jid=None if row["from_me"] else row["sender_jid"],
+            sender=OWN_SENDER
+            if row["from_me"]
+            else (row["sender_name"] or (row["sender_jid"] or "").partition("@")[0]),
+            sender_jid=None if row["from_me"] else (row["sender_jid"] or None),
             chat_name=row["chat_name"],
             text=row["text"] or None,
             created_at=datetime.fromtimestamp(row["ts"], tz=timezone.utc) if row["ts"] else None,

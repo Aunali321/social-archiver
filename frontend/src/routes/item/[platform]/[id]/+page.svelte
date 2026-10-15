@@ -13,8 +13,9 @@
 	import Bookmark from '@lucide/svelte/icons/bookmark';
 	import ScanEye from '@lucide/svelte/icons/scan-eye';
 	import { api, ApiError, type Conversation, type ConversationNode, type ItemDetail } from '$lib/api';
-	import { formatCount, formatDateTime, platformLabel } from '$lib/format';
+	import { displayName, formatCount, formatDateTime, platformLabel, profileHref } from '$lib/format';
 	import Avatar from '$lib/components/Avatar.svelte';
+	import AuthorLine from '$lib/components/AuthorLine.svelte';
 	import PlatformBadge from '$lib/components/PlatformBadge.svelte';
 	import MediaStrip from '$lib/components/MediaStrip.svelte';
 	import ItemCard from '$lib/components/ItemCard.svelte';
@@ -98,7 +99,7 @@
 	}
 </script>
 
-<svelte:head><title>{item ? `@${item.author_username}` : 'Item'} · Archive</title></svelte:head>
+<svelte:head><title>{item ? displayName(item.author) : 'Item'} · Archive</title></svelte:head>
 
 <div class="mx-auto max-w-2xl px-4 pt-4">
 	<button
@@ -137,21 +138,24 @@
 		{/if}
 		<article class="rounded-md bg-surface-container-low p-5">
 			<header class="flex items-center gap-3">
-				<span class="relative shrink-0">
-					<Avatar name={item.author_username} size={44} />
+				<svelte:element
+					this={profileHref(item.author) ? 'a' : 'span'}
+					href={profileHref(item.author)}
+					class="relative shrink-0"
+					aria-label={profileHref(item.author) ? `${displayName(item.author)}'s profile` : undefined}
+				>
+					<Avatar name={displayName(item.author)} src={item.author.avatar_url} size={44} />
 					<span class="absolute -right-1.5 -bottom-1.5 scale-[0.68]">
 						<PlatformBadge platform={item.platform} />
 					</span>
-				</span>
+				</svelte:element>
 				<div class="min-w-0 flex-1">
-					<p class="text-title text-on-surface">
-						{item.author_username}
+					<div class="flex min-w-0 items-baseline gap-1.5 text-title">
+						<AuthorLine author={item.author} />
 						{#if item.shared_by_username}
-							<span class="text-body text-on-surface-variant">
-								· shared by {item.shared_by_username}</span
-							>
+							<span class="shrink-0 text-body text-on-surface-variant">· shared by {item.shared_by_username}</span>
 						{/if}
-					</p>
+					</div>
 					<p class="text-label text-on-surface-variant">
 						{formatDateTime(item.created_at)}
 						{#if item.subreddit}· r/{item.subreddit}{/if}

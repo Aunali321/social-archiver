@@ -2,11 +2,12 @@
 	import Heart from '@lucide/svelte/icons/heart';
 	import ConversationReply from './ConversationReply.svelte';
 	import Avatar from './Avatar.svelte';
+	import AuthorLine from './AuthorLine.svelte';
 	import ItemText from './ItemText.svelte';
 	import MediaStrip from './MediaStrip.svelte';
 	import EngagementRow from './EngagementRow.svelte';
 	import type { ConversationNode } from '$lib/api';
-	import { formatDate } from '$lib/format';
+	import { displayName, formatDate } from '$lib/format';
 
 	/** One post in a conversation, Twitter-shaped: avatar column, bold author, full content.
 	 * Its own replies nest beneath with a connector. */
@@ -25,12 +26,10 @@
 			? 'bg-surface-container'
 			: 'bg-transparent'}"
 	>
-		<Avatar name={item.author_username} size={40} />
+		<Avatar name={displayName(item.author)} src={item.author.avatar_url} size={40} />
 		<div class="min-w-0 flex-1">
 			<p class="flex items-baseline gap-2">
-				<span class="truncate text-label-lg font-medium text-on-surface">
-					{item.author_username}
-				</span>
+				<AuthorLine author={item.author} linked={false} class="text-label-lg" />
 				{#if item.is_seed}
 					<span
 						class="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary-container px-2 py-0.5 text-label text-on-primary-container"

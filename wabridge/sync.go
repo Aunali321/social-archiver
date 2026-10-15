@@ -65,6 +65,9 @@ func runSync(ctx context.Context, cli *whatsmeow.Client, store *Store, pair bool
 	}
 
 	log.Printf("syncing as %s into %s", cli.Store.ID, store.Dir)
+	if err := store.SetAccount(cli.Store.ID.ToNonAD().String()); err != nil {
+		return err
+	}
 	go b.media.Feed(ctx)
 
 	select {
@@ -122,6 +125,7 @@ func (b *bridge) handle(evt any) {
 		if !b.refreshed {
 			b.refreshed = true
 			go b.refreshNames()
+			go b.refreshProfiles()
 		}
 	case *events.LoggedOut:
 		b.once.Do(func() { close(b.loggedOut) })

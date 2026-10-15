@@ -17,6 +17,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from social_archiver.platforms.twitter.profile import profile_snapshot
 from social_archiver.platforms.twitter import config, content
 
 logger = logging.getLogger(__name__)
@@ -1076,6 +1077,7 @@ def _map_tweet_result(result: dict | None) -> dict[str, Any] | None:
         "author_name": name or username,
         "author_id": user_id,
         "author_protected": bool(user_legacy.get("protected")),
+        "author_profile": profile_snapshot(user_result),
         "created_at": legacy.get("created_at"),
         "reply_count": legacy.get("reply_count"),
         "retweet_count": legacy.get("retweet_count"),

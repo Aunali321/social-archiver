@@ -25,6 +25,9 @@ class WhatsAppPort:
             lines.append(item.created_at.strftime("%Y-%m-%d %H:%M:%S"))
         return "\n".join(lines)
 
+    def profile_url(self, handle: str) -> str:
+        return f"https://wa.me/{handle}"
+
     def downloads_folder(self, item: Item) -> Path:
         return config.DOWNLOADS_DIR / PLATFORM / item.category
 

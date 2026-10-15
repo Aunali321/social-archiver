@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -46,6 +47,19 @@ CREATE TABLE IF NOT EXISTS messages (
 	PRIMARY KEY (chat_jid, msg_id)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+-- What each account in the mirror shows about itself, refreshed daily. picture_id is '' when
+-- the account has no picture or hides it from this one.
+CREATE TABLE IF NOT EXISTS profiles (
+	jid TEXT PRIMARY KEY,
+	about TEXT NOT NULL,
+	picture_id TEXT NOT NULL,
+	picture_path TEXT,
+	refreshed_at INTEGER NOT NULL
+);
+-- The paired account itself, which no message row names: own messages carry no sender.
+CREATE TABLE IF NOT EXISTS account (
+	jid TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_messages_pending_media ON messages(chat_jid, msg_id)
 	WHERE direct_path IS NOT NULL AND local_path IS NULL AND media_error IS NULL;
 `
@@ -126,6 +140,70 @@ func (s *Store) ContactName(jid string) string {
 	var name string
 	_ = s.db.QueryRow("SELECT name FROM contacts WHERE jid = ?", jid).Scan(&name)
 	return name
+}
+
+func (s *Store) SetAccount(jid string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM account"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("INSERT INTO account (jid) VALUES (?)", jid); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ProfileJIDs is every account the mirror holds messages from or a direct chat with, plus the
+// paired account: the people the archive is about, not the whole address book.
+func (s *Store) ProfileJIDs() ([]string, error) {
+	rows, err := s.db.Query(`
+		SELECT sender_jid FROM messages WHERE sender_jid IS NOT NULL AND sender_jid != ''
+		UNION SELECT jid FROM chats WHERE kind = 'dm'
+		UNION SELECT jid FROM account`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var jids []string
+	for rows.Next() {
+		var jid string
+		if err := rows.Scan(&jid); err != nil {
+			return nil, err
+		}
+		jids = append(jids, jid)
+	}
+	return jids, rows.Err()
+}
+
+// PictureID is the picture the stored profile shows, and whether its file is still on disk.
+func (s *Store) PictureID(jid string) (id string, held bool) {
+	var path sql.NullString
+	if err := s.db.QueryRow("SELECT picture_id, picture_path FROM profiles WHERE jid = ?", jid).Scan(&id, &path); err != nil {
+		return "", false
+	}
+	if !path.Valid {
+		return id, id == ""
+	}
+	_, err := os.Stat(path.String)
+	return id, err == nil
+}
+
+func (s *Store) UpsertProfile(jid, about, pictureID, picturePath string) error {
+	var path any
+	if picturePath != "" {
+		path = picturePath
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO profiles (jid, about, picture_id, picture_path, refreshed_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET about = excluded.about, picture_id = excluded.picture_id,
+			picture_path = COALESCE(excluded.picture_path, CASE WHEN excluded.picture_id = picture_id THEN picture_path END),
+			refreshed_at = excluded.refreshed_at`,
+		jid, about, pictureID, path, time.Now().Unix())
+	return err
 }
 
 func (s *Store) ChatName(jid string) string {

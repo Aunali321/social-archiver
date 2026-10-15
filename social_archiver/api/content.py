@@ -22,6 +22,7 @@ from social_archiver.core.media_kind import guess_mime_type
 from social_archiver.core.media_links import links
 from social_archiver.read import conversation, semantic
 from social_archiver.read.models import (
+    AuthorRef,
     ItemFilters,
     ItemKind,
     MatchField,
@@ -30,10 +31,12 @@ from social_archiver.read.models import (
     SearchSort,
     is_seed,
 )
+from social_archiver.read.profiles import Authors, ProfileReader
 from social_archiver.read.store import ArchiveReader
 
 router = APIRouter()
 reader = ArchiveReader(config.DATA_DIR)
+profiles = ProfileReader(reader)
 
 
 class MediaRef(BaseModel):
@@ -53,12 +56,40 @@ class ItemContext(BaseModel):
     submission: "ItemOut | None" = None
 
 
+class AuthorOut(BaseModel):
+    """Who posted an item, as the account shows today. `profile_id` is None where no account
+    stands behind the item: deleted, or never named by what the archive was given."""
+
+    platform: str
+    profile_id: str | None
+    handle: str
+    display_name: str | None = None
+    verified: bool = False
+    is_self: bool = False
+    avatar_url: str | None = None
+
+
+def image_url(platform: str, image_id: int | None) -> str | None:
+    return f"/api/profile-images/{platform}/{image_id}" if image_id is not None else None
+
+
+def author_out(ref: AuthorRef) -> AuthorOut:
+    return AuthorOut(
+        platform=ref.platform,
+        profile_id=ref.profile_id,
+        handle=ref.handle,
+        display_name=ref.display_name,
+        verified=ref.verified,
+        is_self=ref.is_self,
+        avatar_url=image_url(ref.platform, ref.avatar),
+    )
+
+
 class ItemOut(BaseModel):
     item_id: str
     platform: str
     category: str
-    author_username: str
-    author_id: str | None
+    author: AuthorOut
     post_url: str
     text: str | None
     title: str | None  # reddit posts store "**title**\n\nbody" in text; served split
@@ -138,11 +169,6 @@ class ChatOut(BaseModel):
     last_text: str | None
 
 
-class AuthorOut(BaseModel):
-    author: str
-    items: int
-
-
 class FacetsOut(BaseModel):
     categories: dict[str, int]
     origins: dict[str, int]
@@ -165,7 +191,7 @@ class ArchiveStatsOut(BaseModel):
     by_month: dict[str, int]
 
 
-_COMPUTED_FIELDS = {"media", "context", "in_thread", "title", "is_seed"}
+_COMPUTED_FIELDS = {"author", "media", "context", "in_thread", "title", "is_seed"}
 
 
 def _split_reddit_title(item: Item) -> tuple[str | None, str | None]:
@@ -178,8 +204,9 @@ def _split_reddit_title(item: Item) -> tuple[str | None, str | None]:
     return None, item.text
 
 
-def item_out(item: Item) -> ItemOut:
+def item_out(item: Item, authors: Authors) -> ItemOut:
     title, text = _split_reddit_title(item)
+    ref = authors.get((item.platform, item.author_id)) if item.author_id else None
     media = [
         MediaRef(
             index=index,
@@ -195,6 +222,9 @@ def item_out(item: Item) -> ItemOut:
     )
     out = ItemOut(
         **{name: getattr(item, name) for name in ItemOut.model_fields if name not in _COMPUTED_FIELDS},
+        author=author_out(ref)
+        if ref
+        else AuthorOut(platform=item.platform, profile_id=None, handle=item.author_username),
         title=title,
         media=media,
         in_thread=in_thread,
@@ -225,12 +255,13 @@ async def with_context(items: list[Item]) -> list[ItemOut]:
         for ref in _context_refs(item).values():
             wanted.setdefault(item.platform, set()).add(ref)
     neighbours = {platform: await reader.get_many(platform, refs) for platform, refs in wanted.items()}
+    authors = await profiles.authors(items + [n for held in neighbours.values() for n in held.values()])
 
     entries = []
     for item in items:
-        entry = item_out(item)
+        entry = item_out(item, authors)
         held = neighbours.get(item.platform, {})
-        found = {slot: item_out(held[ref]) for slot, ref in _context_refs(item).items() if ref in held}
+        found = {slot: item_out(held[ref], authors) for slot, ref in _context_refs(item).items() if ref in held}
         if found:
             entry.context = ItemContext(**found)
         entries.append(entry)
@@ -243,6 +274,7 @@ class FilterParams(BaseModel):
     platforms: str | None = None  # comma-separated
     category: str | None = None
     author: str | None = None
+    author_id: str | None = None
     subreddit: str | None = None
     chat: str | None = None
     collection: str | None = None
@@ -338,14 +370,19 @@ async def item_detail(platform: str, item_id: str) -> ItemDetailOut:
     related = await reader.related(platform, item)
     categories, collections = await reader.memberships(platform, item_id)
     replies = await with_context(await reader.replies(platform, item_id))
+    authors = await profiles.authors([item, *(r for r in related.values() if r)])
+
+    def neighbour(name: str) -> ItemOut | None:
+        return item_out(related[name], authors) if related[name] else None
+
     return ItemDetailOut(
-        item=item_out(item),
+        item=item_out(item, authors),
         categories=categories,
         collections=collections,
-        parent=item_out(related["parent"]) if related["parent"] else None,
-        quoted=item_out(related["quoted"]) if related["quoted"] else None,
-        retweeted=item_out(related["retweeted"]) if related["retweeted"] else None,
-        discovered_via=item_out(related["discovered_via"]) if related["discovered_via"] else None,
+        parent=neighbour("parent"),
+        quoted=neighbour("quoted"),
+        retweeted=neighbour("retweeted"),
+        discovered_via=neighbour("discovered_via"),
         replies=replies,
     )
 
@@ -355,7 +392,8 @@ async def thread(platform: str, root_id: str) -> list[ItemOut]:
     members = await reader.thread(platform, root_id)
     if not members:
         raise HTTPException(404, f"no {platform} thread {root_id}")
-    return [item_out(i) for i in members]
+    authors = await profiles.authors(members)
+    return [item_out(i, authors) for i in members]
 
 
 class ConversationNodeOut(BaseModel):
@@ -373,8 +411,12 @@ class ConversationOut(BaseModel):
     replies: list[ConversationNodeOut]
 
 
-def _node_out(node: conversation.ConversationNode) -> ConversationNodeOut:
-    return ConversationNodeOut(item=item_out(node.item), replies=[_node_out(r) for r in node.replies])
+def _node_out(node: conversation.ConversationNode, authors: Authors) -> ConversationNodeOut:
+    return ConversationNodeOut(item=item_out(node.item, authors), replies=[_node_out(r, authors) for r in node.replies])
+
+
+def _tree_items(nodes: list[conversation.ConversationNode]) -> list[Item]:
+    return [item for node in nodes for item in (node.item, *_tree_items(node.replies))]
 
 
 @router.get("/api/conversation/{platform}/{item_id}", response_model=ConversationOut)
@@ -384,32 +426,18 @@ async def get_conversation(platform: str, item_id: str) -> ConversationOut:
     tree = await conversation.load(reader, platform, item_id)
     if tree is None:
         raise HTTPException(404, f"no {platform} item {item_id}")
+    authors = await profiles.authors([tree.focus, *tree.ancestors, *_tree_items(tree.replies)])
     return ConversationOut(
-        focus=item_out(tree.focus),
-        ancestors=[item_out(a) for a in tree.ancestors],
+        focus=item_out(tree.focus, authors),
+        ancestors=[item_out(a, authors) for a in tree.ancestors],
         missing_parent=tree.missing_parent,
-        replies=[_node_out(r) for r in tree.replies],
+        replies=[_node_out(r, authors) for r in tree.replies],
     )
 
 
 @router.get("/api/chats/{platform}", response_model=list[ChatOut])
 async def chats(platform: str) -> list[ChatOut]:
     return [ChatOut(**asdict(c)) for c in await reader.chats(platform)]
-
-
-@router.get("/api/authors", response_model=list[AuthorOut])
-async def authors(
-    platforms: str | None = None, prefix: str = "", limit: int = Query(20, ge=1, le=100)
-) -> list[AuthorOut]:
-    """Most prolific authors starting with `prefix`, for autocomplete. A name used on several
-    platforms counts once, with its items summed."""
-    selected = FilterParams(platforms=platforms).filters().platforms or tuple(await reader.present())
-    counts: dict[str, int] = {}
-    for platform in selected:
-        for found in await reader.authors(platform, prefix, limit):
-            counts[found.author] = counts.get(found.author, 0) + found.items
-    ranked = sorted(counts.items(), key=lambda entry: entry[1], reverse=True)[:limit]
-    return [AuthorOut(author=author, items=items) for author, items in ranked]
 
 
 @router.get("/api/facets", response_model=dict[str, FacetsOut])
@@ -465,7 +493,7 @@ async def recover_media(platform: str, item_id: str) -> ItemOut:
         raise HTTPException(409, str(e)) from e
     finally:
         await db.close()
-    return item_out(refreshed)
+    return item_out(refreshed, await profiles.authors([refreshed]))
 
 
 @router.get("/api/platforms")

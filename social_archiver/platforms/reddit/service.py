@@ -41,6 +41,18 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
         await client.close()
 
 
+async def profiles(retry_failed: bool = False):
+    """Reddit accounts are known by name only: describing one costs a request per account, which
+    the archive does not spend. What remains is knowing which account is the archive's own."""
+    config.validate_archive()
+    client = RedditClient()
+    try:
+        async with Database(config.DATABASE_PATH) as db:
+            await db.profiles.mark_self(await client.verify())
+    finally:
+        await client.close()
+
+
 async def source(target: str, kind: str = "subreddit", full: bool = False, no_media: bool = False):
     """`full` has no effect here: the dump is a local file, so every run reads all of it and
     dedupes by id. There is no paging to stop early."""
@@ -79,7 +91,7 @@ async def embed(retry_failed: bool = False):
 
 
 async def run_all(fetch_all: bool = False):
-    jobs = {"archive": lambda: archive(fetch_all)}
+    jobs = {"archive": lambda: archive(fetch_all), "profiles": profiles}
     if config.TELEGRAM_BOT_TOKEN:
         jobs["upload"] = upload
     if config.CAPTIONING_ENABLED:

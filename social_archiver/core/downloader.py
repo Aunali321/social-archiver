@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Awaitable, Callable, TypeVar
@@ -100,6 +102,17 @@ async def fetch_url(url: str, path: Path, timeout: float = 60.0) -> None:
         response.raise_for_status()
         path.write_bytes(response.content)
         logger.debug(f"Downloaded {url} -> {path}")
+
+
+def link_file(source: Path, target: Path):
+    """Hardlink a file another process already fetched, falling back to a copy across
+    filesystems. Data only: replaying the source's permissions onto an ACL-restricted dataset
+    is refused, and the archive has no use for them anyway."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copyfile(source, target)
 
 
 def is_transient(error: Exception) -> bool:

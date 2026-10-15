@@ -6,7 +6,7 @@ from social_archiver.core.cli import build_parser
 from social_archiver.core.config import ConfigError
 from social_archiver.core.utils import setup_logging
 from social_archiver.platforms.instagram import config
-from social_archiver.platforms.instagram.service import archive, caption, embed, run_all, upload
+from social_archiver.platforms.instagram.service import archive, caption, embed, profiles, run_all, upload
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,8 @@ def main():
     match args.command:
         case "archive":
             asyncio.run(archive(args.history, args.category, args.retry_failed))
+        case "profiles":
+            asyncio.run(profiles(args.retry_failed))
         case "upload":
             asyncio.run(upload(args.retry_failed))
         case "caption":

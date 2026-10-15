@@ -44,6 +44,9 @@ class RedditPort:
 
         return "\n".join(lines)
 
+    def profile_url(self, handle: str) -> str:
+        return f"https://reddit.com/user/{handle}"
+
     def downloads_folder(self, item: Item) -> Path:
         return config.DOWNLOADS_DIR / PLATFORM / item.category
 

@@ -7,13 +7,13 @@ from instagrapi.utils import InstagramIdCodec
 
 from social_archiver.platforms.instagram import config
 from social_archiver.platforms.instagram.client import InstagramClient
+from social_archiver.platforms.instagram.fetchers.media_infos import resolve_media
 from social_archiver.platforms.instagram.fetchers.page import MediaPage
 from social_archiver.platforms.instagram.simple_media import SimpleMedia, SimpleUser
 
 logger = logging.getLogger(__name__)
 
 THREAD_PAGE_SIZE = 100  # the server caps a thread page near 75 whatever is asked for
-MEDIA_INFO_BATCH = 50
 MAX_MEDIA_PK = 2**64  # a media pk is a 64-bit int; anything larger is not a shortcode
 SEQ_ID = "40065"  # instagrapi sends this fixed value on every thread request
 
@@ -29,8 +29,7 @@ class SharedFetcher:
     """Yields the media shared in a DM thread, one API page at a time.
 
     A share carries a preview thumbnail and a link, never the post itself, so the real
-    media has to be resolved by id. `media/infos/` resolves a whole page of them in one
-    request; instagrapi only exposes `media/{pk}/info/`, which would be a request each."""
+    media has to be resolved by id, a page of them at a time (fetchers/media_infos.py)."""
 
     def __init__(self, ig_client: InstagramClient):
         self.ig_client = ig_client
@@ -92,30 +91,8 @@ class SharedFetcher:
         return [m for m in media if m], thread.get("oldest_cursor", ""), len(thread.get("items", []))
 
     def _resolve(self, pks: list[str], senders: dict[str, str | None]) -> list[SimpleMedia]:
-        """Resolve shared posts by id, MEDIA_INFO_BATCH per request. Media the account can
-        no longer see (deleted, or the account went private) is absent from the response."""
-        resolved: list[SimpleMedia] = []
-        for start in range(0, len(pks), MEDIA_INFO_BATCH):
-            chunk = pks[start : start + MEDIA_INFO_BATCH]
-            items = self._resolve_chunk(chunk)
-            if len(items) < len(chunk):
-                logger.warning(f"{len(chunk) - len(items)} of {len(chunk)} shared posts no longer available")
-            resolved.extend(self._build(raw, senders.get(str(raw.get("pk")))) for raw in items)
+        resolved = (self._build(raw, senders.get(str(raw.get("pk")))) for raw in resolve_media(self.ig_client, pks))
         return [m for m in resolved if m]
-
-    def _resolve_chunk(self, chunk: list[str]) -> list[dict]:
-        """Instagram answers a batch holding one unresolvable id with an empty response for
-        the *whole* batch, so a single bad id silently costs every id sent with it. Splitting
-        on an empty response isolates the bad one instead of losing the batch, and costs the
-        extra requests only when there is one."""
-        items = self.ig_client.private_request("media/infos/", {"media_ids": ",".join(chunk)}).get("items", [])
-        if items:
-            return items
-        if len(chunk) == 1:
-            logger.warning(f"Shared post {chunk[0]} could not be resolved, not archived")
-            return []
-        mid = len(chunk) // 2
-        return self._resolve_chunk(chunk[:mid]) + self._resolve_chunk(chunk[mid:])
 
     def _build(self, raw: dict, sender: str | None) -> SimpleMedia | None:
         try:

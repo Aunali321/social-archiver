@@ -6,6 +6,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from social_archiver.core.database import ArchiveStatus, Item, StageStatus
+from social_archiver.core.profiles import ProfileSnapshot
 
 
 @dataclass
@@ -27,6 +28,7 @@ class SimpleTweet:
     author_username: str
     author_name: str
     author_id: str | None = None
+    author_profile: ProfileSnapshot | None = None
     created_at: datetime | None = None
 
     reply_count: int | None = None
@@ -134,6 +136,7 @@ class SimpleTweet:
             author_username=data.get("author_username", "unknown"),
             author_name=data.get("author_name", "unknown"),
             author_id=data.get("author_id"),
+            author_profile=data.get("author_profile"),
             created_at=created_at,
             reply_count=data.get("reply_count"),
             retweet_count=data.get("retweet_count"),
@@ -172,6 +175,7 @@ class SimpleTweet:
             category=category,
             author_username=self.author_username,
             author_id=self.author_id,
+            author_profile=self.author_profile,
             text=self.text,
             is_article=self.is_article,
             post_url=self.post_url,

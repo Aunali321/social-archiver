@@ -68,3 +68,25 @@ export const PLATFORM_LABELS: Record<string, string> = {
 export function platformLabel(platform: string): string {
 	return PLATFORM_LABELS[platform] ?? platform;
 }
+
+/** A handle the way its platform writes one. */
+export function formatHandle(platform: string, handle: string): string {
+	switch (platform) {
+		case 'reddit':
+			return `u/${handle}`;
+		case 'whatsapp':
+			return /^\d+$/.test(handle) ? `+${handle}` : handle;
+		default:
+			return `@${handle}`;
+	}
+}
+
+/** Where an account's own page lives in the archive; null for an item no account stands behind. */
+export function profileHref(author: { platform: string; profile_id: string | null }): string | null {
+	return author.profile_id ? `/profile/${author.platform}/${encodeURIComponent(author.profile_id)}` : null;
+}
+
+/** What to call an account: its own name, else its handle. */
+export function displayName(author: { display_name: string | null; handle: string }): string {
+	return author.display_name || author.handle;
+}

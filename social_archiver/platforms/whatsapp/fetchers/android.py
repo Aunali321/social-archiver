@@ -19,7 +19,7 @@ from typing import Self
 
 from social_archiver.core.config import ConfigError
 from social_archiver.platforms.whatsapp.fetchers.crypt import decrypt_msgstore
-from social_archiver.platforms.whatsapp.simple_message import WhatsAppMedia, WhatsAppMessage
+from social_archiver.platforms.whatsapp.simple_message import OWN_SENDER, WhatsAppMedia, WhatsAppMessage
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class AndroidStore:
             chat_jid=chat_jid,
             msg_id=row["key_id"],
             kind="group" if group else "dm",
-            sender="me" if row["from_me"] else self._display(sender_jid),
+            sender=OWN_SENDER if row["from_me"] else self._display(sender_jid),
             sender_jid=None if row["from_me"] else sender_jid,
             chat_name=row["chat_subject"] if group else self._display(chat_jid),
             text=row["text_data"],

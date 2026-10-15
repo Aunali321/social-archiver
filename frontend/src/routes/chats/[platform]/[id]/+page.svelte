@@ -4,7 +4,7 @@
 	import ArrowLeft from '@lucide/svelte/icons/arrow-left';
 	import CircleAlert from '@lucide/svelte/icons/circle-alert';
 	import { api, type Item } from '$lib/api';
-	import { authorHue, dayKey, formatDay, formatTime } from '$lib/format';
+	import { authorHue, dayKey, displayName, formatDay, formatTime } from '$lib/format';
 	import MediaStrip from '$lib/components/MediaStrip.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
@@ -52,7 +52,8 @@
 		}
 	}
 
-	const isMine = (message: Item) => message.author_username === 'me';
+	const isMine = (message: Item) => message.author.is_self;
+	const sender = (message: Item) => message.author.profile_id ?? message.author.handle;
 	const isGroup = $derived(messages.some((m) => m.category === 'group'));
 
 
@@ -117,12 +118,12 @@
 							? 'rounded-br-xs bg-primary-container text-on-primary-container'
 							: 'rounded-bl-xs bg-surface-container-high text-on-surface'}"
 					>
-						{#if isGroup && !mine && (index === 0 || messages[index - 1].author_username !== message.author_username)}
+						{#if isGroup && !mine && (index === 0 || sender(messages[index - 1]) !== sender(message))}
 							<p
 								class="text-label font-medium"
-								style="color: oklch(55% 0.1 {authorHue(message.author_username)})"
+								style="color: oklch(55% 0.1 {authorHue(displayName(message.author))})"
 							>
-								{message.author_username}
+								{displayName(message.author)}
 							</p>
 						{/if}
 						{#if message.media.length}

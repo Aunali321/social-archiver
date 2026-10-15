@@ -6,8 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from social_archiver.core.database import ArchiveStatus, Item
+from social_archiver.core.profiles import ProfileSnapshot
 
 PLATFORM = "whatsapp"
+
+# The sender every store records for the archive's own messages: none of them knows the
+# account's jid, which only the bridge reports (fetchers/bridge.py)
+OWN_SENDER = "me"
 
 
 @dataclass(slots=True)
@@ -23,7 +28,7 @@ class WhatsAppMessage:
     msg_id: str
     kind: str  # "dm" | "group", which is also the archive category
     sender: str  # display name: contact or push name, falling back to the phone number
-    sender_jid: str | None = None  # None for own messages; the store has no jid row for "me"
+    sender_jid: str | None = None  # None for own messages; the store has no jid row for them
     chat_name: str | None = None
     text: str | None = None
     created_at: datetime | None = None
@@ -57,6 +62,7 @@ class WhatsAppMessage:
             category=category,
             author_username=self.sender,
             author_id=self.sender_jid,
+            author_profile=author_snapshot(self.sender_jid) if self.sender_jid else None,
             post_url=f"whatsapp://{self.chat_jid}/{self.msg_id}",
             text=self.text,
             created_at=self.created_at,
@@ -70,3 +76,10 @@ class WhatsAppMessage:
             chat_name=self.chat_name,
             archive_status=ArchiveStatus.ARCHIVED,
         )
+
+
+def author_snapshot(jid: str, name: str | None = None) -> ProfileSnapshot:
+    """A WhatsApp account's handle is its phone number, the jid's user part. A message's sender
+    name is not the account's: the stores fall back to the number, and disagree with each other,
+    so the name comes only from the bridge's contact list, one source for every message."""
+    return ProfileSnapshot(jid, jid.partition("@")[0], display_name=name)

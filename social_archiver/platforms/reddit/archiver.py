@@ -11,7 +11,7 @@ from social_archiver.platforms.reddit.expander import ThreadExpander
 from social_archiver.platforms.reddit.fetchers.export import SeedRef, parse_export
 from social_archiver.platforms.reddit.fetchers.live import fetch_live
 from social_archiver.platforms.reddit.port import PLATFORM, RedditPort
-from social_archiver.platforms.reddit.simple_post import RedditItem
+from social_archiver.platforms.reddit.simple_post import DELETED_AUTHOR, RedditItem
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ def _tombstone(ref: SeedRef, category: str) -> RedditItem:
     return RedditItem(
         fullname=ref.fullname,
         kind="post" if ref.fullname.startswith("t3_") else "comment",
-        author="[deleted]",
+        author=DELETED_AUTHOR,
         subreddit="",
         permalink=ref.permalink,
         origin=category,

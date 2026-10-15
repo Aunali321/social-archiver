@@ -2,14 +2,11 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-
-from instagrapi.types import Media
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from social_archiver.core.database import ArchiveStatus, Item, StageStatus
-
-
-def _url(value: object) -> str | None:
-    return str(value) if value else None
+from social_archiver.core.profiles import ImageRef, ProfileSnapshot
 
 
 @dataclass
@@ -17,6 +14,9 @@ class SimpleUser:
     pk: str
     username: str
     full_name: str | None = None
+    avatar_url: str | None = None
+    verified: bool | None = None
+    private: bool | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "SimpleUser":
@@ -24,6 +24,26 @@ class SimpleUser:
             pk=str(data.get("pk", data.get("id", ""))),
             username=data.get("username", "unknown"),
             full_name=data.get("full_name"),
+            avatar_url=data.get("profile_pic_url"),
+            verified=data.get("is_verified"),
+            private=data.get("is_private"),
+        )
+
+    @property
+    def snapshot(self) -> ProfileSnapshot | None:
+        """A post names its author without a bio or counts; those come only from a profile
+        lookup, which the archive never makes on Instagram. The avatar is keyed by its file
+        name, because the link around it is re-signed on every response."""
+        if not self.pk:
+            return None
+        avatar = ImageRef(Path(urlsplit(self.avatar_url).path).name, self.avatar_url) if self.avatar_url else None
+        return ProfileSnapshot(
+            self.pk,
+            self.username,
+            display_name=self.full_name,
+            verified=self.verified,
+            private=self.private,
+            avatar=avatar,
         )
 
 
@@ -137,33 +157,6 @@ class SimpleMedia:
             product_type=data.get("product_type") or "feed",
         )
 
-    @classmethod
-    def from_instagrapi(cls, media: Media, shared_by_username: str | None = None) -> "SimpleMedia":
-        """Convert an instagrapi model (e.g. a DM media share) so the rest of
-        the archiver only ever handles SimpleMedia."""
-        return cls(
-            pk=str(media.pk),
-            id=media.id,
-            code=media.code or str(media.pk),
-            media_type=media.media_type,
-            caption_text=media.caption_text or "",
-            user=SimpleUser(pk=str(media.user.pk), username=media.user.username, full_name=media.user.full_name),
-            taken_at=media.taken_at,
-            video_url=_url(media.video_url),
-            thumbnail_url=_url(media.thumbnail_url),
-            resources=[
-                SimpleResource(
-                    pk=str(resource.pk),
-                    media_type=resource.media_type,
-                    video_url=_url(resource.video_url),
-                    thumbnail_url=_url(resource.thumbnail_url),
-                )
-                for resource in media.resources
-            ],
-            product_type=media.product_type or "feed",
-            shared_by_username=shared_by_username,
-        )
-
     @property
     def media_urls(self) -> list[str]:
         """Best-quality source URL per media file, in album order. These are
@@ -199,7 +192,8 @@ class SimpleMedia:
             platform="instagram",
             category=category,
             author_username=self.user.username,
-            author_id=self.user.pk,
+            author_id=self.user.pk or None,
+            author_profile=self.user.snapshot,
             text=self.caption_text or None,
             post_url=f"https://instagram.com/p/{self.code}",
             created_at=self.taken_at,
@@ -207,6 +201,7 @@ class SimpleMedia:
             media_count=len(self.resources) if self.media_type == 8 else 1,
             media_types=self.media_kinds,
             media_urls=self.media_urls,
+            origin=category,
             collection_name=self.collection_name,
             shared_by_username=self.shared_by_username,
             link_url=self.link_url,

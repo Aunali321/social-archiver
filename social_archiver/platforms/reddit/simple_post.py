@@ -5,8 +5,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from social_archiver.core.database import ArchiveStatus, Item, StageStatus
+from social_archiver.core.profiles import ProfileSnapshot
 
 PLATFORM = "reddit"
+
+# What Reddit puts where the author was once an account is deleted. No account stands behind it.
+DELETED_AUTHOR = "[deleted]"
 
 
 @dataclass(slots=True)
@@ -62,6 +66,11 @@ class RedditItem:
             return "\n\n".join(s for s in (title, self.body) if s) or None
         return self.body
 
+    @property
+    def author_id(self) -> str | None:
+        """A Reddit username can never be changed or reused, so it is the account's id."""
+        return None if self.author == DELETED_AUTHOR else self.author
+
     def to_item(self, category: str) -> Item:
         """Tombstones are record-only. Text-only items are fully archived on
         insert; items with media wait for the download step."""
@@ -77,6 +86,8 @@ class RedditItem:
             platform=PLATFORM,
             category=category,
             author_username=self.author,
+            author_id=self.author_id,
+            author_profile=ProfileSnapshot(self.author, self.author) if self.author_id else None,
             post_url=self.permalink,
             text=self.text,
             created_at=self.created_at,

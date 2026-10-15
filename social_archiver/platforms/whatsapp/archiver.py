@@ -12,8 +12,6 @@ lives encrypted on a CDN that expires it, so no later job could fetch it anyway.
 """
 
 import logging
-import os
-import shutil
 import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -21,6 +19,7 @@ from typing import Protocol
 
 from social_archiver.core.config import ConfigError
 from social_archiver.core.database import Database, Item
+from social_archiver.core.downloader import link_file
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.platforms.whatsapp import config
 from social_archiver.platforms.whatsapp.fetchers.android import AndroidStore
@@ -101,9 +100,9 @@ def _stores() -> list[Store]:
 
 
 def _link_media(message: WhatsAppMessage, item: Item, folder: Path) -> list[Path]:
-    """Hardlink what the store holds into the downloads folder, named the way the shared
-    downloader names files, falling back to a copy across filesystems. The store's copy
-    stays canonical; these links are what upload, embed and cleanup are allowed to touch."""
+    """Link what the store holds into the downloads folder, named the way the shared
+    downloader names files. The store's copy stays canonical; these links are what upload,
+    embed and cleanup are allowed to touch."""
     paths = []
     for index, media in enumerate(message.media):
         if media.path is None:
@@ -112,13 +111,6 @@ def _link_media(message: WhatsAppMessage, item: Item, folder: Path) -> list[Path
         stem = item.item_id if len(message.media) == 1 else f"{item.item_id}_{index}"
         target = folder / f"{stem}{suffix}"
         if not target.exists():
-            folder.mkdir(parents=True, exist_ok=True)
-            try:
-                os.link(media.path, target)
-            except OSError:
-                # Across filesystems the file is copied instead. Data only: replaying the
-                # source's permissions onto an ACL-restricted dataset is refused, and the
-                # archive has no use for them anyway.
-                shutil.copyfile(media.path, target)
+            link_file(media.path, target)
         paths.append(target)
     return paths

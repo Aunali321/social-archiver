@@ -1,10 +1,11 @@
 <script lang="ts">
 	import ImageIcon from '@lucide/svelte/icons/image';
 	import Avatar from './Avatar.svelte';
+	import AuthorLine from './AuthorLine.svelte';
 	import ItemText from './ItemText.svelte';
 	import MediaStrip from './MediaStrip.svelte';
 	import type { Item } from '$lib/api';
-	import { formatDate } from '$lib/format';
+	import { displayName, formatDate } from '$lib/format';
 
 	/** A graph neighbour embedded compactly inside a card: the quoted tweet, the message
 	 * being replied to. Enough to make the main item legible, one click from the full view. */
@@ -26,8 +27,8 @@
 >
 	<p class="flex items-center gap-2 text-label text-on-surface-variant">
 		{#if label}<span class="shrink-0 font-medium">{label}</span>{/if}
-		<Avatar name={item.author_username} size={20} />
-		<span class="truncate font-medium text-on-surface">{item.author_username}</span>
+		<Avatar name={displayName(item.author)} src={item.author.avatar_url} size={20} />
+		<AuthorLine author={item.author} linked={false} />
 		<span class="ml-auto shrink-0">{formatDate(item.created_at)}</span>
 	</p>
 	{#if item.title}

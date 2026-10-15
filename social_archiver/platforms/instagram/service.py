@@ -6,6 +6,8 @@ import logging
 from social_archiver.core.database import Database
 from social_archiver.core.jobs import UploadJob, cleanup_downloads, run_jobs
 from social_archiver.core.milvus_manager import MilvusManager
+from social_archiver.core.profile_images import download_profile_images
+from social_archiver.core.profile_refresh import refresh_profiles
 from social_archiver.core.telegram_client import TelegramClient
 from social_archiver.llm.factory import create_vlm_client
 from social_archiver.platforms.instagram import config
@@ -14,6 +16,7 @@ from social_archiver.platforms.instagram.client import InstagramClient
 from social_archiver.core.embed import IndexJob
 from social_archiver.platforms.instagram.embedder import CaptionJob
 from social_archiver.platforms.instagram.port import InstagramPort
+from social_archiver.platforms.instagram.profile_refresh import PostAuthorReader
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,16 @@ async def archive(fetch_all: bool = False, category: str | None = None, retry_fa
     async with Database(config.DATABASE_PATH) as db:
         tg = TelegramClient() if config.TELEGRAM_BOT_TOKEN else None
         await ArchiveJob(ig_client, db, PORT, tg).run(fetch_all, category, retry_failed)
+
+
+async def profiles(retry_failed: bool = False):
+    config.validate_archive()
+    ig_client = InstagramClient()
+    await asyncio.to_thread(ig_client.login)
+    async with Database(config.DATABASE_PATH) as db:
+        await db.profiles.mark_self(str(ig_client.client.user_id))
+        await refresh_profiles(db, PostAuthorReader(ig_client))
+        await download_profile_images(db, PORT.platform, retry_failed)
 
 
 async def upload(retry_failed: bool = False):
@@ -60,7 +73,7 @@ async def embed(retry_failed: bool = False):
 
 
 async def run_all(fetch_all: bool = False):
-    jobs = {"archive": lambda: archive(fetch_all)}
+    jobs = {"archive": lambda: archive(fetch_all), "profiles": profiles}
     if config.TELEGRAM_BOT_TOKEN:
         jobs["upload"] = upload
     if config.CAPTIONING_ENABLED:

@@ -18,19 +18,29 @@ from social_archiver.core.media_links import links
 from social_archiver.read import ArchiveReader, ItemFilters
 from social_archiver.read import conversation as conversations
 from social_archiver.read import semantic as semantic_search
-from social_archiver.read.models import SearchSort, bracketed, is_seed
+from social_archiver.read.models import Profile, SearchSort, bracketed, is_seed
+from social_archiver.read.profiles import Authors, ProfileReader
 
 reader = ArchiveReader(config.DATA_DIR)
+profiles = ProfileReader(reader)
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
 
 
-def _item(item: Item) -> dict[str, Any]:
+def _author(item: Item, authors: Authors) -> dict[str, Any]:
+    """The account as it is named today, which can differ from the handle the post carried."""
+    ref = authors.get((item.platform, item.author_id)) if item.author_id else None
+    if ref is None:
+        return {"handle": item.author_username}
+    return {"handle": ref.handle, "name": ref.display_name, "profile_id": ref.profile_id}
+
+
+def _item(item: Item, authors: Authors) -> dict[str, Any]:
     """Compact and text-first: what a model needs to reason about a post, not pipeline state."""
     out: dict[str, Any] = {
         "platform": item.platform,
         "item_id": item.item_id,
-        "author": item.author_username,
+        "author": _author(item, authors),
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "category": item.category,
         "url": item.post_url,
@@ -73,9 +83,41 @@ def _media_kinds(item: Item) -> list[str | None]:
     return [item.media_types[i] if i < len(item.media_types) else None for i in range(count)]
 
 
+def _profile(profile: Profile) -> dict[str, Any]:
+    current = profile.current
+    out: dict[str, Any] = {
+        "platform": profile.platform,
+        "profile_id": profile.profile_id,
+        "handle": current.handle,
+        "name": current.display_name,
+        "bio": current.bio,
+        "location": current.location,
+        "website": current.website,
+        "status": profile.status,
+        "is_you": profile.is_self,
+        "followers": profile.followers,
+        "following": profile.following,
+        "joined": profile.joined_at.date().isoformat() if profile.joined_at else None,
+        "archived_items": profile.encounters.total,
+        "items_by_origin": profile.encounters.origins,
+        "history": [
+            {
+                "from": version.first_seen.date().isoformat(),
+                "to": version.last_seen.date().isoformat(),
+                "handle": version.handle,
+                "name": version.display_name,
+                "bio": version.bio,
+            }
+            for version in profile.versions
+        ],
+    }
+    return {name: value for name, value in out.items() if value not in (None, "", [], {})}
+
+
 async def search_archive(
     query: str = "",
     semantic: bool = False,
+    people: bool = False,
     sort: SearchSort = SearchSort.RELEVANCE,
     limit: int = 20,
     offset: int = 0,
@@ -96,16 +138,26 @@ async def search_archive(
     semantic=True ranks by meaning when embeddings are configured (no offset).
     Each item lists its media files with a signed url (valid 24 hours, no sign-in needed)
     to fetch the original image, video, audio or document. Open a hit with open_item for
-    its neighbours, replies or whole discussion."""
+    its neighbours, replies or whole discussion.
+    from: matches every handle and name an account has gone by, so a renamed account is
+    found by its old name. people=True searches accounts instead of items: query words
+    match handles, names and bios (past ones too), most archived first; an empty query
+    lists the most archived accounts. A person's items are then from:handle."""
     if not 1 <= limit <= 100:
         raise ValueError("limit must be between 1 and 100")
+    if people:
+        hits = await profiles.search(query, tuple(await reader.present()), limit=limit)
+        found = [await profiles.get(hit.author.platform, hit.author.profile_id) for hit in hits]
+        return [_profile(profile) for profile in found if profile]
     if semantic:
-        found = await semantic_search.find(reader, query, ItemFilters(), limit=limit)
-        return [{**_item(item), "matched": hit.caption} for hit, item in found]
+        found_items = await semantic_search.find(reader, query, ItemFilters(), limit=limit)
+        authors = await profiles.authors([item for _, item in found_items])
+        return [{**_item(item, authors), "matched": hit.caption} for hit, item in found_items]
     hits = await reader.search(query, ItemFilters(), sort, limit=limit, offset=offset)
+    authors = await profiles.authors([h.item for h in hits])
     return [
         {
-            **_item(h.item),
+            **_item(h.item, authors),
             **({"matched_text": bracketed(h.snippet)} if h.snippet else {}),
             **({"matched_media": bracketed(h.media_snippet)} if h.media_snippet else {}),
         }
@@ -113,7 +165,9 @@ async def search_archive(
     ]
 
 
-async def open_item(platform: str, item_id: str, view: Literal["item", "discussion"] = "item") -> dict[str, Any]:
+async def open_item(
+    platform: str, item_id: str, view: Literal["item", "discussion", "author"] = "item"
+) -> dict[str, Any]:
     """Open one item from search_archive.
 
     view="item": the item with its neighbours (the post it replies to, quotes or retweets,
@@ -121,17 +175,26 @@ async def open_item(platform: str, item_id: str, view: Literal["item", "discussi
     view="discussion": the whole conversation around it. For twitter and reddit that is the
     ancestors (root first) and the nested reply tree; for whatsapp, that chat's messages on
     the same day. Entries carry is_seed: false means the archiver pulled it in as context,
-    not that the user liked or saved it."""
+    not that the user liked or saved it.
+    view="author": the account that posted it, with every handle, name and bio it has had
+    and how many of its items the archive holds, by origin."""
     item = await reader.get(platform, item_id)
     if item is None:
         raise ValueError(f"no {platform} item {item_id}")
     if view == "discussion":
         return await _discussion(platform, item)
-    opened = _item(item)
+    if view == "author":
+        profile = await profiles.get(platform, item.author_id) if item.author_id else None
+        if profile is None:
+            raise ValueError(f"no account is known behind {platform} item {item_id}")
+        return _profile(profile)
     related = await reader.related(platform, item)
-    opened.update({name: _item(neighbour) for name, neighbour in related.items() if neighbour})
-    if replies := await reader.replies(platform, item_id, limit=25):
-        opened["reply_items"] = [_item(r) for r in replies]
+    replies = await reader.replies(platform, item_id, limit=25)
+    authors = await profiles.authors([item, *(n for n in related.values() if n), *replies])
+    opened = _item(item, authors)
+    opened.update({name: _item(neighbour, authors) for name, neighbour in related.items() if neighbour})
+    if replies:
+        opened["reply_items"] = [_item(r, authors) for r in replies]
     return opened
 
 
@@ -139,20 +202,24 @@ async def _discussion(platform: str, item: Item) -> dict[str, Any]:
     if platform in conversations.CONVERSATION_PLATFORMS:
         tree = await conversations.load(reader, platform, item.item_id)
 
+        def members(nodes: list[conversations.ConversationNode]) -> list[Item]:
+            return [entry for node in nodes for entry in (node.item, *members(node.replies))]
+
+        authors = await profiles.authors([tree.focus, *tree.ancestors, *members(tree.replies)])
+
         def node(entry: conversations.ConversationNode) -> dict[str, Any]:
-            return {**_item(entry.item), "replies": [node(r) for r in entry.replies]}
+            return {**_item(entry.item, authors), "replies": [node(r) for r in entry.replies]}
 
         return {
-            "focus": _item(tree.focus),
-            "ancestors": [_item(a) for a in tree.ancestors],
+            "focus": _item(tree.focus, authors),
+            "ancestors": [_item(a, authors) for a in tree.ancestors],
             "missing_parent": tree.missing_parent,
             "replies": [node(r) for r in tree.replies],
         }
     if item.thread_root_id:
-        return {
-            "focus_id": item.item_id,
-            "messages": [_item(m) for m in await reader.thread(platform, item.thread_root_id)],
-        }
+        messages = await reader.thread(platform, item.thread_root_id)
+        authors = await profiles.authors(messages)
+        return {"focus_id": item.item_id, "messages": [_item(m, authors) for m in messages]}
     raise ValueError(f"{platform} items have no discussion; use view='item'")
 
 

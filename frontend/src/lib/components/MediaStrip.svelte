@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { displayName } from '$lib/format';
 	import ImageOff from '@lucide/svelte/icons/image-off';
 	import Film from '@lucide/svelte/icons/film';
 	import Music from '@lucide/svelte/icons/music';
@@ -38,7 +39,7 @@
 	}
 
 	const src = (media: MediaRef) => api.mediaUrl(item.platform, item.item_id, media.index);
-	const alt = (media: MediaRef) => `${media.type ?? 'media'} ${media.index + 1} from ${item.author_username}`;
+	const alt = (media: MediaRef) => `${media.type ?? 'media'} ${media.index + 1} from ${displayName(item.author)}`;
 </script>
 
 {#if available.length}
