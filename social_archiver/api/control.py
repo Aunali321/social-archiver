@@ -171,7 +171,7 @@ async def status() -> dict:
         if schedule := schedules.get(platform):
             entry.scheduled = schedule.enabled
             entry.scheduled_categories = schedule.categories
-            entry.next_run = schedule.next_run.strftime("%H:%M") if schedule.enabled else None
+            entry.next_run = schedule.next_run.strftime("%a %H:%M") if schedule.enabled else None
             entry.interval_minutes = schedule.interval_minutes
         platforms.append(entry)
 

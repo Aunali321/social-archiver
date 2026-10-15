@@ -23,7 +23,7 @@
 	let sourcePlatform = $state('');
 	let sourceTarget = $state('');
 
-	const INTERVALS = [30, 60, 120, 180, 240, 360, 480, 720, 1440];
+	const INTERVALS = [30, 60, 120, 180, 240, 360, 480, 720, 1440, 4320];
 
 	async function refresh() {
 		try {
@@ -70,7 +70,7 @@
 		const minutes = INTERVALS.includes(current) ? INTERVALS : [...INTERVALS, current].sort((a, b) => a - b);
 		return minutes.map((m) => ({
 			value: String(m),
-			label: `every ${m % 60 ? `${m}m` : `${m / 60}h`}`
+			label: `every ${m % 60 ? `${m}m` : m % 1440 ? `${m / 60}h` : `${m / 1440}d`}`
 		}));
 	}
 

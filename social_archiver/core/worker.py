@@ -9,6 +9,7 @@ long walk queues behind it rather than racing it.
 import asyncio
 import importlib
 import logging
+import random
 import traceback
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -75,7 +76,8 @@ def sidecar_status(platform: str) -> str | None:
 
 
 def next_run(interval_minutes: int) -> datetime:
-    return datetime.now() + timedelta(minutes=interval_minutes)
+    """The interval is the mean, not the period: a fixed cadence is what flags an account as automated."""
+    return datetime.now() + timedelta(minutes=interval_minutes * random.uniform(0.75, 1.25))
 
 
 async def enqueue_cycle(queue: JobQueue, schedule: Schedule, source: str) -> list[Job]:
